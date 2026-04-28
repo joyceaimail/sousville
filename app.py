@@ -678,16 +678,23 @@ def check_daily_reset():
 
 
 def get_client_ip():
-    """從 headers 取得訪客真實 IP（支援反向代理）。"""
+    """從 headers 取得訪客真實 IP（支援 Cloudflare + Render 反向代理）。"""
     try:
         headers = st.context.headers
-        return (
-            headers.get("X-Forwarded-For", "").split(",")[0].strip()
-            or headers.get("X-Real-IP", "").strip()
-            or ""
-        )
+        # Cloudflare 代理會帶 CF-Connecting-IP
+        ip = headers.get("CF-Connecting-IP", "").strip()
+        if ip:
+            return ip
+        # Render 反向代理
+        ip = headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        if ip:
+            return ip
+        ip = headers.get("X-Real-IP", "").strip()
+        if ip:
+            return ip
     except Exception:
-        return ""
+        pass
+    return ""
 
 
 def check_ip_change():
