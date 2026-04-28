@@ -14,6 +14,7 @@ import streamlit as st
 import json
 import os
 import hashlib
+import bisect
 import math
 import re
 from datetime import date, timedelta, datetime
@@ -175,13 +176,18 @@ AI_SYSTEM_PROMPT = """你是「舒肥底家 SousVille」的營養助手。你的
 估算時以勻稱份量為基準，根據圖片中食物份量做上下調整。"""
 
 
+_gemini_configured = False
+
 def process_image(file):
     """使用 Gemini 2.0 Flash 辨識食物照片，回傳營養 JSON。"""
+    global _gemini_configured
     if not GEMINI_API_KEY:
         return {"error": "AI 服務尚未設定，請聯絡管理員。"}
 
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
+        if not _gemini_configured:
+            genai.configure(api_key=GEMINI_API_KEY)
+            _gemini_configured = True
         model = genai.GenerativeModel(
             model_name="gemini-2.0-flash",
             system_instruction=AI_SYSTEM_PROMPT,
@@ -386,9 +392,10 @@ st.set_page_config(
 
 (LOGO_PATH.parent).mkdir(exist_ok=True)
 
+st.markdown('<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Quicksand:wght@500;600;700&display=swap" rel="stylesheet">', unsafe_allow_html=True)
+
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Quicksand:wght@500;600;700&display=swap');
 
 :root { lang: "zh-TW";
   --blue:         #1B9D9E;
@@ -718,11 +725,17 @@ def check_ip_change():
 #  Notion 工具函數（相容 notion-client v2 / v3）
 # ═══════════════════════════════════════════════════════════
 
+_notion_instance = None
+
 def get_notion():
+    global _notion_instance
+    if _notion_instance is not None:
+        return _notion_instance
     if not NOTION_TOKEN:
         st.error("NOTION_TOKEN 尚未設定")
         st.stop()
-    return Client(auth=NOTION_TOKEN)
+    _notion_instance = Client(auth=NOTION_TOKEN)
+    return _notion_instance
 
 
 def _query_db(notion, database_id, **kwargs):
@@ -1019,30 +1032,36 @@ def calc_streak(notion, user_page_id):
     if "streak" in st.session_state and "streak_date" in st.session_state:
         if st.session_state.streak_date == str(taiwan_today()):
             return
+    start = (taiwan_today() - timedelta(days=60)).isoformat()
+    try:
+        results = _query_db(notion, DAILY_LOGS_DB_ID, filter={"and": [
+            {"property": "使用者", "relation": {"contains": user_page_id}},
+            {"property": "Date", "date": {"on_or_after": start}},
+        ]}).get("results", [])
+    except Exception:
+        st.session_state.streak = 0
+        st.session_state.streak_date = str(taiwan_today())
+        return
+
+    date_set = set()
+    for page in results:
+        d = page["properties"]["Date"]["date"]["start"]
+        p = page["properties"]
+        has = (
+            (p.get("攝取卡路里", {}).get("number", 0) or 0) > 0
+            or (p.get("消耗卡路里", {}).get("number", 0) or 0) > 0
+        )
+        if has:
+            date_set.add(d)
+
     streak = 0
     check = taiwan_today() - timedelta(days=1)
     for _ in range(60):
-        ds = str(check)
-        try:
-            results = _query_db(notion, DAILY_LOGS_DB_ID, filter={"and": [
-                {"property": "使用者", "relation": {"contains": user_page_id}},
-                {"property": "Date", "date": {"equals": ds}},
-            ]}).get("results", [])
-            if results:
-                p = results[0]["properties"]
-                has_activity = (
-                    (p.get("攝取卡路里", {}).get("number", 0) or 0) > 0
-                    or (p.get("消耗卡路里", {}).get("number", 0) or 0) > 0
-                )
-                if has_activity:
-                    streak += 1
-                else:
-                    break
-            else:
-                break
-        except Exception:
+        if str(check) in date_set:
+            streak += 1
+            check -= timedelta(days=1)
+        else:
             break
-        check -= timedelta(days=1)
     st.session_state.streak = streak
     st.session_state.streak_date = str(taiwan_today())
 
@@ -1058,7 +1077,7 @@ def add_custom_exercise(name, met, category="自訂"):
     _save_local_custom_exercises(st.session_state.custom_exercises)
     if EXERCISES_DB_ID:
         try:
-            notion = Client(auth=NOTION_TOKEN)
+            notion = get_notion()
             notion.pages.create(
                 parent={"database_id": EXERCISES_DB_ID},
                 properties={
@@ -1098,11 +1117,7 @@ def calc_exercise_cal(met, weight, duration, intensity):
     return round(met * weight * (duration / 60) * INTENSITY_MULT.get(intensity, 1.0))
 
 def get_level(xp):
-    lv = 1
-    for t in LEVEL_XP:
-        if xp >= t:
-            lv = LEVEL_XP.index(t) + 1
-    return lv
+    return bisect.bisect_right(LEVEL_XP, xp)
 
 def get_next_level_xp(xp):
     lv = get_level(xp)
