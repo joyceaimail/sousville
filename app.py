@@ -15,6 +15,7 @@ import json
 import os
 import hashlib
 import math
+import re
 from datetime import date, timedelta, datetime
 from pathlib import Path
 import pytz
@@ -854,8 +855,7 @@ def create_user(notion, name, phone, email):
         if resp.status_code == 200:
             return resp.json()
         else:
-            st.error(f"Notion API HTTP {resp.status_code}")
-            st.json(resp.json())
+            st.error(f"建立帳號失敗（HTTP {resp.status_code}），請確認 Email 格式正確後重試。")
             return None
     except Exception as e:
         st.error(f"建立使用者時發生網路錯誤：{e}")
@@ -939,6 +939,8 @@ def get_or_create_daily_log(notion, user_page_id, date_str):
 
 
 def patch_daily_log(notion, log_id, props):
+    if not log_id:
+        return
     try:
         notion.pages.update(page_id=log_id, properties=props)
     except Exception as e:
@@ -972,6 +974,8 @@ def query_weight_history(notion, user_page_id, days=30):
 
 
 def sync_meal_to_notion(notion, log_id, meal_name, calories):
+    if not log_id:
+        return
     parts = st.session_state.today_meals + [meal_name]
     new_text = "; ".join(parts)[:2000]
     por = st.session_state.portions
@@ -986,6 +990,8 @@ def sync_meal_to_notion(notion, log_id, meal_name, calories):
 
 
 def sync_exercise_to_notion(notion, log_id, exercise_name, calories):
+    if not log_id:
+        return
     parts = st.session_state.today_exercises + [exercise_name]
     new_text = "; ".join(parts)[:2000]
     patch_daily_log(notion, log_id, {
@@ -1514,6 +1520,12 @@ def page_auth():
             st.warning("請填寫姓名與 Email")
             return
 
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email.strip()):
+            st.error("Email 格式不正確，請輸入有效的信箱，例如 you@example.com")
+            return
+
+        email = email.strip()
+
         try:
             notion = get_notion()
         except Exception as e:
@@ -1529,7 +1541,7 @@ def page_auth():
         else:
             new_user = create_user(notion, name, "", email)
             if new_user is None:
-                st.stop()
+                return
             st.session_state.user_page_id = new_user["id"]
             st.session_state.user_data = {
                 "name": name, "phone": "", "email": email,
