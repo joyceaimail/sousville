@@ -19,6 +19,9 @@ import math
 import re
 from datetime import date, timedelta, datetime
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
 import pytz
 
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
@@ -547,6 +550,54 @@ h1,h2,h3,h4 {
   border: 1px solid var(--border); box-shadow: var(--shadow);
 }
 
+/* ── Game Map ── */
+.game-map { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 20px 0; }
+.game-row { display: flex; align-items: center; gap: 0; }
+.game-node {
+  width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-weight: 900; font-size: 1.1rem; color: #fff;
+  cursor: default; transition: transform .2s, box-shadow .2s; position: relative;
+  font-family: 'Quicksand', sans-serif;
+}
+.game-node.completed {
+  background: #43A047; box-shadow: 0 3px 12px rgba(67,160,71,0.35); border: 3px solid #66BB6A;
+}
+.game-node.current {
+  background: var(--gold); box-shadow: 0 3px 16px rgba(255,179,0,0.5);
+  border: 3px solid #FFCA28; animation: pulse-glow 1.8s ease-in-out infinite;
+}
+.game-node.locked {
+  background: #ccc; box-shadow: 0 2px 6px rgba(0,0,0,0.1); border: 3px solid #bbb; opacity: 0.6;
+}
+.game-node.boss { width: 64px; height: 64px; font-size: 1.3rem; }
+.game-connector { width: 40px; height: 4px; border-radius: 2px; }
+.game-connector.completed { background: #43A047; }
+.game-connector.locked { background: #ddd; }
+.game-chapter-label {
+  text-align: center; font-size: .95rem; font-weight: 800; color: var(--text-dim);
+  margin: 8px 0 4px; font-family: 'Noto Sans TC', sans-serif;
+}
+.game-hearts-bar {
+  display: flex; align-items: center; gap: 6px; justify-content: center;
+  font-size: 1.3rem; padding: 8px 0;
+}
+.game-hearts-bar .heart-full { color: #EF5350; }
+.game-hearts-bar .heart-empty { color: #ddd; }
+.game-progress-bar { display: flex; align-items: center; gap: 8px; justify-content: center; margin: 4px 0; }
+.game-progress-track { width: 200px; height: 8px; background: rgba(27,157,158,0.12); border-radius: 4px; overflow: hidden; }
+.game-progress-fill { height: 100%; background: linear-gradient(90deg, var(--blue), var(--blue-light)); border-radius: 4px; transition: width .5s ease; }
+.game-result-box {
+  text-align: center; padding: 40px 24px; border-radius: 24px;
+  animation: pop .5s ease;
+}
+.game-result-box.success { background: linear-gradient(135deg, #E8F5E9, #FFF8E1); border: 2px solid #43A047; }
+.game-result-box.fail { background: linear-gradient(135deg, #FFEBEE, #FFF3E0); border: 2px solid #EF5350; }
+
+@keyframes pulse-glow {
+  0%, 100% { box-shadow: 0 3px 16px rgba(255,179,0,0.5); transform: scale(1); }
+  50% { box-shadow: 0 3px 28px rgba(255,179,0,0.8); transform: scale(1.08); }
+}
+
 .brand-banner { width: 100%; border-radius: 0 0 18px 18px; overflow: hidden; margin-bottom: 8px; }
 .brand-banner img { width: 100%; height: auto; display: block; border-radius: 0 0 18px 18px; }
 
@@ -658,6 +709,12 @@ def init_session_state():
         "custom_exercises": _load_local_custom_exercises(),
         "streak": 0,
         "portions": {"蛋白質": 0, "全穀根莖": 0, "蔬菜": 0, "油脂": 0, "奶類": 0},
+        "game_hearts": 5,
+        "game_progress": {},
+        "current_level": None,
+        "level_q_idx": 0,
+        "level_correct": 0,
+        "hearts_regen_time": None,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -676,6 +733,9 @@ def check_daily_reset():
         st.session_state.today_log_id = None
         st.session_state.today_quiz_xp = 0
         st.session_state.coupon_unlocked = False
+        st.session_state.current_level = None
+        st.session_state.level_q_idx = 0
+        st.session_state.level_correct = 0
         st.session_state.portions = {"蛋白質": 0, "全穀根莖": 0, "蔬菜": 0, "油脂": 0, "奶類": 0}
         if st.session_state.get("user_page_id"):
             try:
@@ -1474,6 +1534,15 @@ def _parse_user_props(p):
         "level":    p.get("等級", {}).get("number", 1) or 1,
         "coupon":   p.get("優惠券已解鎖", {}).get("checkbox", False) or False,
     }
+    gp_text = p.get("遊戲進度", {}).get("rich_text", [])
+    if gp_text and gp_text[0].get("plain_text", "").strip():
+        try:
+            data["game_progress"] = json.loads(gp_text[0]["plain_text"])
+        except (json.JSONDecodeError, KeyError):
+            data["game_progress"] = {}
+    gh = p.get("遊戲生命", {}).get("number")
+    if gh is not None:
+        data["game_hearts"] = gh
     return data
 
 
@@ -1484,6 +1553,11 @@ def _apply_user_session(user_data):
     st.session_state.coupon_unlocked = user_data["coupon"]
     if user_data.get("height") and user_data.get("weight"):
         st.session_state.profile_complete = True
+    # Load game progress from Notion if available
+    if user_data.get("game_progress") and isinstance(user_data["game_progress"], dict):
+        st.session_state.game_progress = user_data["game_progress"]
+    if user_data.get("game_hearts") is not None:
+        st.session_state.game_hearts = user_data["game_hearts"]
 
 
 def _restore_user_session(notion, page_id):
@@ -1721,80 +1795,327 @@ def page_profile(notion):
         else:
             st.info("調整體重後會自動記錄，累積資料後會顯示趨勢圖。")
 
-def tab_daily_challenge(notion):
-    st.markdown("### 🧠 今日健康挑戰", unsafe_allow_html=True)
-
+def _load_quiz_bank():
     if not QUIZ_FILE.exists():
+        return None
+    with open(QUIZ_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _get_all_levels(quiz_bank):
+    levels = []
+    for ch in quiz_bank["chapters"]:
+        for lv in ch["levels"]:
+            levels.append(lv)
+    return levels
+
+
+def _get_next_level(quiz_bank, completed):
+    for ch in quiz_bank["chapters"]:
+        for lv in ch["levels"]:
+            if lv["id"] not in completed:
+                return lv
+    return None
+
+
+def _save_game_progress(notion, user_page_id):
+    gp = st.session_state.game_progress
+    gp["hearts"] = st.session_state.game_hearts
+    gp["total_game_xp"] = gp.get("total_game_xp", 0)
+    try:
+        update_user_profile(notion, user_page_id, {
+            "遊戲進度": {"rich_text": [{"text": {"content": json.dumps(gp, ensure_ascii=False)}}]},
+            "遊戲生命": {"number": st.session_state.game_hearts},
+        })
+    except Exception:
+        pass
+
+
+def _check_hearts_regen():
+    rt = st.session_state.hearts_regen_time
+    if rt is None or st.session_state.game_hearts >= 5:
+        return
+    now = datetime.now(TAIPEI_TZ)
+    elapsed = (now - rt).total_seconds() / 60
+    regen_count = int(elapsed / 30)
+    if regen_count > 0:
+        st.session_state.game_hearts = min(5, st.session_state.game_hearts + regen_count)
+        if st.session_state.game_hearts >= 5:
+            st.session_state.hearts_regen_time = None
+        else:
+            st.session_state.hearts_regen_time = rt + timedelta(minutes=regen_count * 30)
+
+
+def _render_hearts_bar():
+    full = st.session_state.game_hearts
+    empty = 5 - full
+    hearts_html = '<div class="game-hearts-bar">'
+    hearts_html += '<span class="heart-full">' + '❤️' * full + '</span>'
+    hearts_html += '<span class="heart-empty">' + '🖤' * empty + '</span>'
+    rt = st.session_state.hearts_regen_time
+    if rt and full < 5:
+        now = datetime.now(TAIPEI_TZ)
+        mins_left = max(0, 30 - int((now - rt).total_seconds() / 60))
+        hearts_html += f'<span style="font-size:.75rem; color:var(--text-dim); margin-left:6px;">{mins_left}分鐘後恢復 1 顆</span>'
+    hearts_html += '</div>'
+    st.markdown(hearts_html, unsafe_allow_html=True)
+
+
+def _render_game_map(quiz_bank):
+    completed = set(st.session_state.game_progress.get("completed", []))
+    next_lv = _get_next_level(quiz_bank, completed)
+    next_id = next_lv["id"] if next_lv else None
+
+    nodes_per_row = 5
+    map_html = '<div class="game-map">'
+
+    for ch in quiz_bank["chapters"]:
+        map_html += f'<div class="game-chapter-label">{ch["icon"]} {ch["title"]}</div>'
+        ch_levels = ch["levels"]
+        for row_start in range(0, len(ch_levels), nodes_per_row):
+            row_levels = ch_levels[row_start:row_start + nodes_per_row]
+            row_idx = row_start // nodes_per_row
+            if row_idx % 2 == 1:
+                row_levels = list(reversed(row_levels))
+            map_html += '<div class="game-row">'
+            for i, lv in enumerate(row_levels):
+                is_completed = lv["id"] in completed
+                is_current = lv["id"] == next_id
+                is_boss = lv.get("boss", False)
+                if is_completed:
+                    cls = "completed"
+                    icon = "✅"
+                elif is_current:
+                    cls = "current"
+                    icon = "⭐"
+                else:
+                    cls = "locked"
+                    icon = "🔒"
+                boss_cls = " boss" if is_boss else ""
+                title = lv["title"].replace("🧬 ", "").replace("🥗 ", "").replace("🏃 ", "")
+                map_html += f'<div class="game-node {cls}{boss_cls}" title="{title}">{icon}</div>'
+                if i < len(row_levels) - 1:
+                    conn_cls = "completed" if is_completed else "locked"
+                    map_html += f'<div class="game-connector {conn_cls}"></div>'
+            map_html += '</div>'
+    map_html += '</div>'
+    st.markdown(map_html, unsafe_allow_html=True)
+
+
+def _render_level_stats(quiz_bank):
+    completed = set(st.session_state.game_progress.get("completed", []))
+    total_levels = sum(len(ch["levels"]) for ch in quiz_bank["chapters"])
+    done_count = len(completed & {lv["id"] for ch in quiz_bank["chapters"] for lv in ch["levels"]})
+    total_game_xp = st.session_state.game_progress.get("total_game_xp", 0)
+    pct = int(done_count / max(1, total_levels) * 100)
+
+    stats_html = f'''<div class="game-progress-bar">
+      <div class="game-progress-track">
+        <div class="game-progress-fill" style="width:{pct}%"></div>
+      </div>
+      <span style="font-size:.82rem; color:var(--text-dim); font-weight:700;">{done_count}/{total_levels}</span>
+      <span style="font-size:.82rem; color:var(--gold); font-weight:900; margin-left:4px;">{total_game_xp} XP</span>
+    </div>'''
+    st.markdown(stats_html, unsafe_allow_html=True)
+
+
+def tab_daily_challenge(notion):
+    st.markdown("### 🎯 關卡挑戰", unsafe_allow_html=True)
+
+    quiz_bank = _load_quiz_bank()
+    if not quiz_bank:
         st.error("找不到 quiz_bank.json")
         return
 
-    with open(QUIZ_FILE, "r", encoding="utf-8") as f:
-        all_q = json.load(f)
+    completed = set(st.session_state.game_progress.get("completed", []))
+    _check_hearts_regen()
 
-    today_seed = int(hashlib.md5(str(taiwan_today()).encode()).hexdigest(), 16)
-    q = all_q[today_seed % len(all_q)]
-
-    if st.session_state.daily_quiz_done:
-        st.markdown("""
-        <div class="quiz-card" style="text-align:center; padding:44px;">
-          <div style="font-size:3rem; margin-bottom:10px;">✅</div>
-          <h3 style="color:#1B9D9E;">今日挑戰已完成！</h3>
-          <p style="color:var(--text-dim);">明天回來挑戰新題目</p>
-          <span style="display:inline-block; margin-top:10px; background:#1B9D9E;
-                      padding:6px 18px; border-radius:20px; font-weight:900; color:#fff;">
-            +20 XP
-          </span>
-        </div>""", unsafe_allow_html=True)
-        with st.expander("查看解析"):
-            st.markdown(f"**Q:** {q['question']}")
-            st.markdown(f"**A:** {q['options'][q['answer']]}")
-            st.markdown(f"{q['explanation']}")
+    # ── STATE: playing a level ──
+    if st.session_state.current_level is not None:
+        _play_level(notion, quiz_bank)
         return
 
-    st.markdown(f"""
-    <div style="margin-bottom:16px;">
-      <span style="background:linear-gradient(135deg,#1B9D9E,#FFB300);
-                  padding:6px 16px; border-radius:20px;
-                  font-size:.85rem; font-weight:700; color:#fff;">
-        +20 XP
+    # ── STATE: map view ──
+    _render_level_stats(quiz_bank)
+    _render_hearts_bar()
+
+    # Refill hearts button
+    if st.session_state.game_hearts < 5 and st.session_state.total_xp >= 10:
+        if st.button("💔 花 10 XP 補滿 ❤️×5", use_container_width=True):
+            st.session_state.total_xp -= 10
+            st.session_state.game_hearts = 5
+            st.session_state.hearts_regen_time = None
+            update_user_profile(notion, st.session_state.user_page_id, {
+                "總經驗值": {"number": st.session_state.total_xp},
+            })
+            _save_game_progress(notion, st.session_state.user_page_id)
+            st.rerun()
+
+    st.markdown("---")
+    _render_game_map(quiz_bank)
+
+    next_lv = _get_next_level(quiz_bank, completed)
+    if next_lv:
+        if st.session_state.game_hearts <= 0:
+            st.warning("❤️ 生命值已用完！請等待恢復或花 10 XP 補滿。")
+        else:
+            boss_tag = " 👑 BOSS" if next_lv.get("boss") else ""
+            reward = next_lv["reward_xp"]
+            if st.button(f"🎮 開始挑戰：{next_lv['title']}{boss_tag}（+{reward} XP）",
+                         type="primary", use_container_width=True):
+                st.session_state.current_level = next_lv["id"]
+                st.session_state.level_q_idx = 0
+                st.session_state.level_correct = 0
+                st.rerun()
+    else:
+        st.markdown("""
+        <div class="quiz-card" style="text-align:center; padding:44px;">
+          <div style="font-size:3rem; margin-bottom:10px;">🏆</div>
+          <h3 style="color:#FFB300;">恭喜全部通關！</h3>
+          <p style="color:var(--text-dim);">你是健康知識達人！</p>
+        </div>""", unsafe_allow_html=True)
+
+
+def _play_level(notion, quiz_bank):
+    level_id = st.session_state.current_level
+    level = None
+    for ch in quiz_bank["chapters"]:
+        for lv in ch["levels"]:
+            if lv["id"] == level_id:
+                level = lv
+                break
+        if level:
+            break
+    if not level:
+        st.session_state.current_level = None
+        return
+
+    questions = level["questions"]
+    q_idx = st.session_state.level_q_idx
+    total_q = len(questions)
+
+    # Progress bar
+    pct = int((q_idx) / max(1, total_q) * 100)
+    st.markdown(f'''<div style="margin:8px 0 4px;">
+      <span style="font-weight:800; font-size:.9rem; color:var(--text);">
+        {level["title"]}
       </span>
       <span style="color:var(--text-dim); font-size:.8rem; margin-left:8px;">
-        {taiwan_today().strftime('%Y/%m/%d')}
+        {q_idx + 1} / {total_q}
       </span>
-    </div>""", unsafe_allow_html=True)
+    </div>
+    <div style="width:100%; height:8px; background:rgba(27,157,158,0.1);
+                border-radius:4px; overflow:hidden;">
+      <div style="width:{pct}%; height:100%; border-radius:4px;
+                  background:linear-gradient(90deg,var(--blue),var(--blue-light));
+                  transition:width .4s ease;"></div>
+    </div>''', unsafe_allow_html=True)
 
-    st.markdown(f"""
-    <div class="quiz-card" style="padding:28px 32px; margin-bottom:20px;">
-      <h3 style="font-size:1.15rem; margin:0;">{q['question']}</h3>
-    </div>""", unsafe_allow_html=True)
+    _render_hearts_bar()
+
+    if q_idx >= total_q:
+        _finish_level(notion, quiz_bank, level)
+        return
+
+    q = questions[q_idx]
+    boss_cls = " boss" if level.get("boss") else ""
+
+    st.markdown(f'''
+    <div class="quiz-card{boss_cls}" style="padding:28px 32px; margin:16px 0;">
+      <h3 style="font-size:1.1rem; margin:0;">{q["question"]}</h3>
+    </div>''', unsafe_allow_html=True)
 
     selected = st.radio("選擇答案", range(len(q["options"])),
                         format_func=lambda i: q["options"][i],
+                        key=f"game_q_{q_idx}",
                         label_visibility="collapsed")
 
-    if st.button("\u63d0\u4ea4\u7b54\u6848", type="primary", use_container_width=True):
+    if st.button("確認答案", type="primary", use_container_width=True,
+                 key=f"game_btn_{q_idx}"):
         correct = selected == q["answer"]
-        st.session_state.daily_quiz_done = True
-        user_ans = q["options"][selected]
-        quiz_record = f"Q: {q['question']} A: {user_ans} ({'O' if correct else 'X'})"
-        quiz_props = {
-            "\u554f\u7b54\u5b8c\u6210":  {"checkbox": True},
-            "\u7b54\u984c\u5167\u5bb9":  {"rich_text": [{"text": {"content": quiz_record}}]},
-        }
         if correct:
-            st.session_state.today_quiz_xp = 20
-            quiz_props["\u7372\u5f97\u7d93\u9a57\u503c"] = {"number": 20}
-            unlocked = add_user_xp(notion, st.session_state.user_page_id, 20)
-        patch_daily_log(notion, st.session_state.today_log_id, quiz_props)
-        if correct:
-            st.success("\U0001f389 \u56de\u7b54\u6b63\u78ba\uff01+20 XP")
-            st.balloons()
-            if unlocked:
-                st.markdown("<br>", unsafe_allow_html=True)
-                render_coupon_popup()
+            st.session_state.level_correct += 1
+            st.success(f"✅ 正確！{q['explanation']}")
         else:
-            st.error(f"\U0001f605 \u7b54\u932f\u4e86\uff01\u6b63\u78ba\u7b54\u6848\uff1a{q['options'][q['answer']]}")
-        st.markdown(f"\U0001f4d6 **{q['explanation']}**")
+            st.session_state.game_hearts = max(0, st.session_state.game_hearts - 1)
+            if st.session_state.game_hearts <= 0:
+                st.session_state.hearts_regen_time = datetime.now(TAIPEI_TZ)
+            st.error(f"❌ 答錯了！正確答案：{q['options'][q['answer']]}")
+            st.markdown(f"📖 {q['explanation']}")
+            if st.session_state.game_hearts <= 0:
+                st.session_state.current_level = None
+                _save_game_progress(notion, st.session_state.user_page_id)
+                st.rerun()
+                return
+
+        st.session_state.level_q_idx = q_idx + 1
+        st.rerun()
+
+
+def _finish_level(notion, quiz_bank, level):
+    correct = st.session_state.level_correct
+    total_q = len(level["questions"])
+    passed = correct >= 3  # Need 3/5 correct to pass
+    is_boss = level.get("boss", False)
+    reward = level["reward_xp"]
+
+    if passed:
+        gp = st.session_state.game_progress
+        gp.setdefault("completed", []).append(level["id"])
+        gp["completed"] = list(set(gp["completed"]))
+        gp["total_game_xp"] = gp.get("total_game_xp", 0) + reward
+        st.session_state.game_progress = gp
+        st.session_state.daily_quiz_done = True
+        st.session_state.today_quiz_xp = reward
+
+        unlocked = add_user_xp(notion, st.session_state.user_page_id, reward)
+
+        if st.session_state.today_log_id:
+            patch_daily_log(notion, st.session_state.today_log_id, {
+                "問答完成": {"checkbox": True},
+                "獲得經驗值": {"number": reward},
+            })
+
+        _save_game_progress(notion, st.session_state.user_page_id)
+
+        boss_text = " 👑 BOSS 通過！" if is_boss else ""
+        st.markdown(f'''
+        <div class="game-result-box success">
+          <div style="font-size:3rem; margin-bottom:8px;">{"🏆" if is_boss else "🎉"}</div>
+          <h3 style="color:#43A047; margin:0 0 8px;">通關成功{boss_text}</h3>
+          <p style="color:var(--text-dim); margin:0 0 12px;">
+            答對 {correct}/{total_q} 題
+          </p>
+          <span style="display:inline-block; background:#43A047;
+                      padding:6px 20px; border-radius:20px; font-weight:900; color:#fff;">
+            +{reward} XP
+          </span>
+        </div>''', unsafe_allow_html=True)
+        st.balloons()
+
+        if is_boss:
+            st.session_state.coupon_unlocked = True
+            update_user_profile(notion, st.session_state.user_page_id, {
+                "優惠券已解鎖": {"checkbox": True},
+            })
+            render_coupon_popup()
+        elif unlocked:
+            st.markdown("<br>", unsafe_allow_html=True)
+            render_coupon_popup()
+    else:
+        st.markdown(f'''
+        <div class="game-result-box fail">
+          <div style="font-size:3rem; margin-bottom:8px;">💪</div>
+          <h3 style="color:#EF5350; margin:0 0 8px;">挑戰失敗</h3>
+          <p style="color:var(--text-dim); margin:0 0 4px;">
+            答對 {correct}/{total_q} 題（需 3 題才能通關）
+          </p>
+          <p style="color:var(--text-dim); font-size:.85rem;">再接再厲，你可以的！</p>
+        </div>''', unsafe_allow_html=True)
+
+    if st.button("← 返回地圖", use_container_width=True):
+        st.session_state.current_level = None
+        st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════
