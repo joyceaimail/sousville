@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: sousville-admin
+    runtime: python
+    repo: https://github.com/joyceaimail/sousville
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run admin.py --server.port=$PORT --server.headless=true --server.enableCORS=false --server.enableXsrfProtection=false --browser.gatherUsageStats=false
