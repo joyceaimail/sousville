@@ -259,14 +259,22 @@ def page_login():
 
         if SUPABASE_URL:
             try:
-                admins = sb_get("admin_users", columns="id,username",
+                import bcrypt
+                admins = sb_get("admin_users", columns="id,username,password_hash",
                                 username=username)
                 if not admins:
                     st.error("帳號不存在")
                     return
+                stored_hash = admins[0].get("password_hash", "")
+                if stored_hash and not bcrypt.checkpw(password.encode(), stored_hash.encode()):
+                    st.error("密碼錯誤")
+                    return
                 st.session_state.admin_auth = True
                 st.session_state.admin_user = username
+                st.session_state.admin_role = admins[0].get("role", "admin")
                 st.rerun()
+            except ImportError:
+                st.error("缺少 bcrypt 模組，請執行 pip install bcrypt")
             except Exception as e:
                 st.error(f"驗證失敗：{e}")
         else:
