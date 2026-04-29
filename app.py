@@ -30,9 +30,6 @@ def taiwan_today():
     """回傳台北時區的今天日期 (date)。"""
     return datetime.now(TAIPEI_TZ).date()
 
-import requests as http_requests
-from notion_client import Client
-import google.generativeai as genai
 
 # ═══════════════════════════════════════════════════════════
 #  常數與設定
@@ -188,6 +185,7 @@ def process_image(file):
         return {"error": "AI 服務尚未設定，請聯絡管理員。"}
 
     try:
+        import google.generativeai as genai
         if not _gemini_configured:
             genai.configure(api_key=GEMINI_API_KEY)
             _gemini_configured = True
@@ -794,6 +792,7 @@ def get_notion():
     if not NOTION_TOKEN:
         st.error("NOTION_TOKEN 尚未設定")
         st.stop()
+    from notion_client import Client
     _notion_instance = Client(auth=NOTION_TOKEN)
     return _notion_instance
 
@@ -905,6 +904,7 @@ def _clear_auth_cache():
 
 
 def create_user(notion, name, phone, email):
+    import requests as http_requests
     db_id = _verify_db_id(USERS_DB_ID, "Users")
 
     payload = {
