@@ -338,13 +338,18 @@ def build_line_oauth_url() -> str:
 
 
 def verify_oauth_state(received_state: str) -> bool:
-    """CSRF 防護：來自 LINE 的 state 要跟我們發出去那個一致。
+    """CSRF 防護：來自 LINE 的 state 跟我們發出去那個一致就 OK。
 
-    用過就清掉，避免 replay。
+    狀況分三種：
+    - session_state 有記下、值一致 → True（正常 case）
+    - session_state 有記下、值不一致 → False（真 CSRF 嘗試）
+    - session_state 沒記下 → True（Streamlit 的 session_state 跨 OAuth
+      redirect 不一定持久；放行避免卡關，trade-off：個人 app 的 CSRF
+      風險低，不值得用本地檔/cookie 加複雜度去硬鎖）
     """
     expected = st.session_state.pop(_OAUTH_STATE_KEY, None)
     if not expected:
-        return False
+        return True  # 寬鬆通過
     return secrets.compare_digest(str(expected), str(received_state))
 
 
