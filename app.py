@@ -1584,6 +1584,21 @@ def page_auth():
       <p style="color:var(--text-dim); font-size:1.05rem;">SousVille — 你的遊戲化健康管理夥伴</p>
     </div>""", unsafe_allow_html=True)
 
+    # === TEMP DEBUG ===（驗證 env 後拿掉）
+    import os as _os
+    _channel_env = _os.environ.get("LINE_CHANNEL_ID", "<missing>")
+    _api_env = _os.environ.get("API_BASE_URL", "<missing>")
+    _channel_via_helper = api_client.get_line_channel_id()
+    st.code(
+        "🔧 DEBUG (build " + str(__import__('datetime').datetime.now()) + ")\n"
+        f"os.environ['LINE_CHANNEL_ID']  = {repr(_channel_env)}\n"
+        f"os.environ['API_BASE_URL']     = {repr(_api_env)}\n"
+        f"api_client.get_line_channel_id() = {repr(_channel_via_helper)}\n"
+        f"api_client.API_BASE_URL          = {repr(api_client.API_BASE_URL)}",
+        language="text",
+    )
+    # === END DEBUG ===
+
     # ── 1. 處理 LINE 跳回的 callback (?code=...&state=...) ──
     qp = dict(st.query_params)
     if "code" in qp:
