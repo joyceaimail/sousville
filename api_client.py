@@ -23,8 +23,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import requests
 import streamlit as st
@@ -293,6 +295,89 @@ def is_authenticated() -> bool:
     return access is not None
 
 
+# ─── LINE OAuth flow ────────────────────────────────────────────
+
+
+_LINE_AUTHORIZE_URL = "https://access.line.me/oauth2/v2.1/authorize"
+_OAUTH_STATE_KEY = "_line_oauth_state"
+
+
+def get_line_channel_id() -> str:
+    """前端建 OAuth URL 用的 channel_id（公開資訊）。"""
+    return _get_secret("LINE_CHANNEL_ID")
+
+
+def get_line_callback_url() -> str:
+    """LINE 認證後跳回來的網址。預設線上 app.joyceaimail.org。"""
+    return _get_secret("LINE_LOGIN_CALLBACK_URL", "https://app.joyceaimail.org")
+
+
+def build_line_oauth_url() -> str:
+    """產生 LINE OAuth 授權頁網址，順手把 state（CSRF token）存進 session_state。
+
+    呼叫流程：
+        url = build_line_oauth_url()
+        st.link_button("用 LINE 登入", url)
+        # → 使用者點下去，跳到 LINE，授權後回到 callback URL，帶 ?code=...&state=...
+    """
+    state = secrets.token_urlsafe(24)
+    st.session_state[_OAUTH_STATE_KEY] = state
+
+    params = {
+        "response_type": "code",
+        "client_id": get_line_channel_id(),
+        "redirect_uri": get_line_callback_url(),
+        "state": state,
+        "scope": "profile openid",
+    }
+    return f"{_LINE_AUTHORIZE_URL}?{urlencode(params)}"
+
+
+def verify_oauth_state(received_state: str) -> bool:
+    """CSRF 防護：來自 LINE 的 state 要跟我們發出去那個一致。
+
+    用過就清掉，避免 replay。
+    """
+    expected = st.session_state.pop(_OAUTH_STATE_KEY, None)
+    if not expected:
+        return False
+    return secrets.compare_digest(str(expected), str(received_state))
+
+
+def handle_oauth_callback(query_params: dict[str, Any]) -> dict[str, Any] | None:
+    """從 ``st.query_params`` 處理 LINE 跳回來的 ``?code=...&state=...``。
+
+    成功 → 自動存 JWT、清掉 query string，回 user dict。
+    驗證失敗 / 沒有 code → 回 None。
+    LINE 拒絕 / 後端錯誤 → raise APIError。
+    """
+    code = query_params.get("code")
+    state = query_params.get("state")
+    if not code:
+        return None
+
+    # query_params 在 Streamlit 1.30+ 是 list、之後變 str；都吃下來
+    if isinstance(code, list):
+        code = code[0] if code else None
+    if isinstance(state, list):
+        state = state[0] if state else None
+    if not code:
+        return None
+
+    if not state or not verify_oauth_state(state):
+        raise APIError(400, "OAuth state 驗證失敗，請重新登入")
+
+    data = login_with_line_code(code)
+
+    # 把 ?code=... 從網址清掉，避免重整時又用同一張 code 觸發第二次（會失敗）
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
+
+    return data.get("user") if isinstance(data, dict) else None
+
+
 # ─── Cached read-only helpers ───────────────────────────────────
 
 
@@ -329,3 +414,70 @@ def health_calc(
             "goal": goal,
         },
     )
+
+
+# ─── Session bootstrap ──────────────────────────────────────────
+
+
+def _compute_age_from_birth(birth_iso: str | None) -> int | None:
+    if not birth_iso:
+        return None
+    try:
+        from datetime import date
+        bd = date.fromisoformat(birth_iso)
+        today = date.today()
+        return today.year - bd.year - ((today.month, today.day) < (bd.month, bd.day))
+    except (ValueError, TypeError):
+        return None
+
+
+def load_user_into_session() -> bool:
+    """登入成功後呼叫一次：拉 ``/users/me`` + ``/profile`` + ``/stats``，
+    把資料寫進 ``st.session_state``，**對應到舊版的 user_data shape**，
+    讓 app.py 裡既有讀 ``user_data["height"]`` 之類的程式碼不用改。
+
+    回 ``True`` 表示載入成功；``False`` 表示 API 失敗（通常是 token 失效，
+    呼叫端應該 ``clear_tokens()`` 後丟回登入頁）。
+    """
+    try:
+        me = api.get("/api/v1/users/me")
+        profile = api.get("/api/v1/users/me/profile")
+        stats = api.get("/api/v1/users/me/stats")
+    except (Unauthenticated, APIError):
+        return False
+
+    height = float(profile["height_cm"]) if profile.get("height_cm") else None
+    weight = float(profile["weight_kg"]) if profile.get("weight_kg") else None
+
+    user_data: dict[str, Any] = {
+        "name": me.get("display_name") or "",
+        "phone": "",
+        "email": me.get("email") or "",
+        "gender": profile.get("gender") or "",
+        "age": _compute_age_from_birth(profile.get("birth_date")),
+        "height": height,
+        "weight": weight,
+        "activity": profile.get("activity_level") or "",
+        "goal": profile.get("goal") or "",
+        "total_xp": int(stats.get("xp", 0) or 0),
+        "level": int(stats.get("level", 1) or 1),
+        "coupon": False,  # 之後從 /users/me/discount-codes 推導，暫時 False
+        "game_progress": {
+            "completed": stats.get("completed_levels", []) or [],
+            "total_game_xp": int(stats.get("total_game_xp", 0) or 0),
+        },
+        "game_hearts": int(stats.get("hearts", 5) or 5),
+    }
+
+    st.session_state.user_data = user_data
+    st.session_state.user_id = me.get("id")
+    # 暫時把 user_id 同時塞進 user_page_id（舊版命名），讓既有讀取程式碼不用改
+    st.session_state.user_page_id = me.get("id")
+    st.session_state.total_xp = user_data["total_xp"]
+    st.session_state.coupon_unlocked = user_data["coupon"]
+    st.session_state.game_progress = user_data["game_progress"]
+    st.session_state.game_hearts = user_data["game_hearts"]
+    if user_data["height"] and user_data["weight"]:
+        st.session_state.profile_complete = True
+
+    return True
