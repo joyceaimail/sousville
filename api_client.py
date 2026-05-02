@@ -303,8 +303,12 @@ _OAUTH_STATE_KEY = "_line_oauth_state"
 
 
 def get_line_channel_id() -> str:
-    """前端建 OAuth URL 用的 channel_id（公開資訊）。"""
-    return _get_secret("LINE_CHANNEL_ID")
+    """前端建 OAuth URL 用的 channel_id（公開資訊）。
+
+    Render 偶爾會吃掉自訂 env vars，這裡寫死預設值當保險。
+    要切其他 channel 時再從 env 蓋過。channel_secret 仍只放在後端。
+    """
+    return _get_secret("LINE_CHANNEL_ID", default="2009958293")
 
 
 def get_line_callback_url() -> str:
