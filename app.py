@@ -24,6 +24,9 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 import pytz
 
+import api_client
+from api_client import APIError
+
 TAIPEI_TZ = pytz.timezone("Asia/Taipei")
 
 def taiwan_today():
@@ -1574,80 +1577,64 @@ def _restore_user_session(notion, page_id):
 
 
 def page_auth():
+    """LINE Login OAuth 流程 — 已從舊版 email/Notion 切換到新後端 API。"""
     _show_logo(center=True, height=140)
     st.markdown("""
     <div style="text-align:center; padding:0 0 28px;">
       <p style="color:var(--text-dim); font-size:1.05rem;">SousVille — 你的遊戲化健康管理夥伴</p>
     </div>""", unsafe_allow_html=True)
 
-    # ── 自動登入：嘗試從本地快取恢復 ──
-    cached_email, cached_page_id = _load_auth_cache()
-    if cached_email and cached_page_id:
+    # ── 1. 處理 LINE 跳回的 callback (?code=...&state=...) ──
+    qp = dict(st.query_params)
+    if "code" in qp:
         try:
-            notion = get_notion()
-            if _restore_user_session(notion, cached_page_id):
-                st.session_state.authenticated = True
-                st.session_state.login_ip = get_client_ip()
-                st.success(f"歡迎回來，{st.session_state.user_data['name']}！")
-                st.rerun()
-            else:
-                _clear_auth_cache()
-        except Exception:
-            _clear_auth_cache()
-
-    # ── 手動登入表單（只需姓名 + 信箱） ──
-    with st.form("auth_form"):
-        c1, c2 = st.columns(2)
-        with c1:
-            name  = st.text_input("姓名", placeholder="請輸入你的姓名")
-        with c2:
-            email = st.text_input("Email", placeholder="you@example.com")
-        submitted = st.form_submit_button("開始你的健康旅程", use_container_width=True)
-
-    if submitted:
-        if not name or not email:
-            st.warning("請填寫姓名與 Email")
+            api_client.handle_oauth_callback(qp)
+        except APIError as exc:
+            st.error(f"登入失敗：{exc.detail}")
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
             return
 
-        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email.strip()):
-            st.error("Email 格式不正確，請輸入有效的信箱，例如 you@example.com")
-            return
-
-        email = email.strip()
-
-        try:
-            notion = get_notion()
-        except Exception as e:
-            st.error(f"連接 Notion 失敗：{e}")
-            return
-
-        user = find_user(notion, email)
-
-        if user:
-            st.session_state.user_page_id = user["id"]
-            _apply_user_session(_parse_user_props(user["properties"]))
-            st.success(f"歡迎回來，{name}！")
+        if api_client.load_user_into_session():
+            st.session_state.authenticated = True
+            st.session_state.login_ip = get_client_ip()
+            st.success(f"歡迎，{st.session_state.user_data.get('name') or '使用者'}！")
+            st.rerun()
         else:
-            new_user = create_user(notion, name, "", email)
-            if new_user is None:
-                return
-            st.session_state.user_page_id = new_user["id"]
-            st.session_state.user_data = {
-                "name": name, "phone": "", "email": email,
-                "gender": "", "age": None, "height": None,
-                "weight": None, "activity": "", "goal": "",
-                "total_xp": 0, "level": 1, "coupon": False,
-            }
-            st.session_state.total_xp = 0
-            st.session_state.coupon_unlocked = False
-            st.success(f"歡迎加入舒肥底家，{name}！")
+            st.error("無法載入使用者資料，請稍後再試")
+            api_client.clear_tokens()
+        return
 
-        # 去重並快取
-        deduplicate_users(notion, email)
-        _save_auth_cache(email, st.session_state.user_page_id)
-        st.session_state.authenticated = True
-        st.session_state.login_ip = get_client_ip()
-        st.rerun()
+    # ── 2. 嘗試用快取的 JWT 自動恢復登入 ──
+    if api_client.is_authenticated():
+        if api_client.load_user_into_session():
+            st.session_state.authenticated = True
+            st.session_state.login_ip = get_client_ip()
+            st.rerun()
+        else:
+            api_client.clear_tokens()
+
+    # ── 3. 顯示「用 LINE 登入」按鈕 ──
+    st.markdown(
+        "<p style='text-align:center; color:var(--text-dim); margin-bottom:18px;'>"
+        "用 LINE 帳號登入即可開始"
+        "</p>",
+        unsafe_allow_html=True,
+    )
+
+    if not api_client.get_line_channel_id():
+        st.error("尚未設定 LINE_CHANNEL_ID，請聯絡管理員。")
+        return
+
+    line_url = api_client.build_line_oauth_url()
+    st.link_button(
+        "🟢 用 LINE 登入",
+        line_url,
+        type="primary",
+        use_container_width=True,
+    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2529,65 +2516,67 @@ def page_exercise_manager():
 #  主流程
 # ═══════════════════════════════════════════════════════════
 
+def _phase2_logged_in_view():
+    """Phase 2 暫定：登入後只顯示玩家狀態 dashboard + migration 進度。
+
+    其餘 tabs（飲食 / 運動 / 熱量赤字 / 今日挑戰 / 個人資料）需要重接 API，
+    在後續 phase 一個一個 migrate。期間使用者可以登入確認 LINE 帳號 +
+    看到自己 XP / hearts / streak，這些都直接從新 API 拉。
+    """
+    _show_logo(center=True, height=100)
+
+    ud = st.session_state.user_data
+    name = ud.get("name") or "使用者"
+    st.success(f"✅ 已用 LINE 登入：**{name}**")
+
+    cols = st.columns(4)
+    cols[0].metric("XP", ud.get("total_xp", 0))
+    cols[1].metric("等級", ud.get("level", 1))
+    cols[2].metric("❤️", ud.get("game_hearts", 5))
+    completed = ud.get("game_progress", {}).get("completed", [])
+    cols[3].metric("已通關卡", f"{len(completed)} / 14")
+
+    st.divider()
+
+    st.info(
+        """
+        🚧 **API 遷徙進行中**
+
+        後端 (sufeidijia-api) 已經接好；前端的 tabs 會在後續 phase 一個一個從
+        Notion 切到新 API：
+
+        - 🍽️ 飲食紀錄 — Phase 3
+        - 🏃 運動紀錄 — Phase 3
+        - 📉 熱量赤字 — Phase 3
+        - 🎯 今日挑戰（Quiz / Duolingo 地圖）— Phase 4
+        - ⚙️ 個人資料 — Phase 3
+
+        現在你可以：登入確認帳號通、看自己 XP / hearts。tabs 之後會逐步上線。
+        """
+    )
+
+    if st.button("🚪 登出", use_container_width=True):
+        api_client.clear_tokens()
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+        st.rerun()
+
+
 def main():
     init_session_state()
-    check_daily_reset()
-    check_ip_change()
 
     if not st.session_state.authenticated:
         page_auth()
         return
 
-    try:
-        notion = get_notion()
-    except Exception as e:
-        st.error(f"連接 Notion 失敗：{e}")
-        st.stop()
-
-    if st.session_state.profile_complete and st.session_state.user_page_id:
-        get_or_create_daily_log(notion, st.session_state.user_page_id,
-                                st.session_state.current_date)
-
-    if st.session_state.user_page_id:
-        calc_streak(notion, st.session_state.user_page_id)
-
-    if st.session_state.get("show_profile"):
-        render_sidebar()
-        page_profile(notion)
-        return
-
-    if st.session_state.get("show_exercise_mgr"):
-        render_sidebar()
-        page_exercise_manager()
-        return
-
-    with st.sidebar:
-        render_sidebar()
-
-    render_top_dashboard()
-
-    if not st.session_state.profile_complete:
-        st.warning("請先點擊左側「⚙️ 個人設定」完成資料填寫。")
-        return
-
-    tab1, tab2, tab3, tab4 = st.tabs(["🎯 今日挑戰", "🍽️ 飲食紀錄", "🏃 運動紀錄", "📉 熱量赤字"])
-
-    with tab1:
-        tab_daily_challenge(notion)
-    with tab2:
-        tab_diet_record(notion)
-    with tab3:
-        tab_exercise_record(notion)
-    with tab4:
-        tab_calorie_deficit(notion)
-
-    st.markdown("""
-    <div style="display:flex; justify-content:center; gap:10px; padding:20px 0 8px;">
-      <span style="width:10px; height:10px; border-radius:50%; background:#1B9D9E; display:inline-block;"></span>
-      <span style="width:10px; height:10px; border-radius:50%; background:rgba(27,157,158,0.25); display:inline-block;"></span>
-      <span style="width:10px; height:10px; border-radius:50%; background:rgba(27,157,158,0.25); display:inline-block;"></span>
-      <span style="width:10px; height:10px; border-radius:50%; background:rgba(27,157,158,0.25); display:inline-block;"></span>
-    </div>""", unsafe_allow_html=True)
+    # Phase 2：API 模式只顯示登入確認 dashboard。
+    # 舊版的 Notion tabs 流程暫時關閉，避免 LINE 登入後撞到 Notion 連線錯誤。
+    # Phase 3+ 會把每個 tab 改寫成 API 呼叫並逐步重新打開。
+    _phase2_logged_in_view()
 
 
 if __name__ == "__main__":
