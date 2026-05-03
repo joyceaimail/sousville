@@ -1614,7 +1614,9 @@ def page_auth():
             st.session_state.login_ip = get_client_ip()
             st.rerun()
         else:
-            api_client.clear_tokens()
+            # 不 clear_tokens — 可能只是後端 cold start 或暫時 502。
+            # 顯示提示讓使用者重整頁，token 還在不會被踢出。
+            st.warning("後端暫時無法回應，請稍後重整頁面再試一次。")
 
     # ── 3. 雙路徑登入 UI：LINE / Email ──
     tab_line, tab_email = st.tabs(["🟢 LINE", "📧 Email"])
@@ -1694,8 +1696,12 @@ def _render_email_login_flow():
                 )
                 st.rerun()
             else:
-                st.error("登入成功但無法載入使用者資料，請稍後再試")
-                api_client.clear_tokens()
+                # token 還在 .auth_cache.json，使用者重整頁就會走快取登入，
+                # 不要在這 clear — backend cold start 常見、不該把 user 踢回 step 1。
+                st.warning(
+                    "登入成功但載入使用者資料超時（後端 cold start）。"
+                    "請按 ⌘+R 或 F5 重整頁面，會自動完成登入。"
+                )
         return
 
     # step == "request"
