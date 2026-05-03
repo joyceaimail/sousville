@@ -464,18 +464,40 @@ def _compute_age_from_birth(birth_iso: str | None) -> int | None:
         return None
 
 
+def _api_get_with_retry(path: str, retries: int = 2) -> Any:
+    """轉發到 ``api.get``；遇到非 401 的 ``APIError``（例如 5xx 冷啟動）retry 一次。
+
+    401 直接跳出（token 真的壞）；其他暫時性錯誤睡 1 秒再試，避免使用者卡關。
+    """
+    import time as _time
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            return api.get(path)
+        except Unauthenticated:
+            raise
+        except APIError as exc:
+            last_exc = exc
+            if attempt < retries:
+                _time.sleep(1.0)
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+
+
 def load_user_into_session() -> bool:
     """登入成功後呼叫一次：拉 ``/users/me`` + ``/profile`` + ``/stats``，
     把資料寫進 ``st.session_state``，**對應到舊版的 user_data shape**，
     讓 app.py 裡既有讀 ``user_data["height"]`` 之類的程式碼不用改。
 
-    回 ``True`` 表示載入成功；``False`` 表示 API 失敗（通常是 token 失效，
-    呼叫端應該 ``clear_tokens()`` 後丟回登入頁）。
+    回 ``True`` 表示載入成功；``False`` 表示 API 失敗（含 retry 後仍失敗）。
+    呼叫端不要急著 clear_tokens — token 可能有效，只是 backend 暫時 502。
     """
     try:
-        me = api.get("/api/v1/users/me")
-        profile = api.get("/api/v1/users/me/profile")
-        stats = api.get("/api/v1/users/me/stats")
+        me = _api_get_with_retry("/api/v1/users/me")
+        profile = _api_get_with_retry("/api/v1/users/me/profile")
+        stats = _api_get_with_retry("/api/v1/users/me/stats")
     except (Unauthenticated, APIError):
         return False
 
