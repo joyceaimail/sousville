@@ -1616,25 +1616,117 @@ def page_auth():
         else:
             api_client.clear_tokens()
 
-    # ── 3. 顯示「用 LINE 登入」按鈕 ──
+    # ── 3. 雙路徑登入 UI：LINE / Email ──
+    tab_line, tab_email = st.tabs(["🟢 LINE", "📧 Email"])
+
+    with tab_line:
+        st.markdown(
+            "<p style='text-align:center; color:var(--text-dim); margin:8px 0 18px;'>"
+            "用你的 LINE 帳號登入"
+            "</p>",
+            unsafe_allow_html=True,
+        )
+        if not api_client.get_line_channel_id():
+            st.error("尚未設定 LINE_CHANNEL_ID，請聯絡管理員。")
+        else:
+            line_url = api_client.build_line_oauth_url()
+            st.link_button(
+                "🟢 用 LINE 登入",
+                line_url,
+                type="primary",
+                use_container_width=True,
+            )
+
+    with tab_email:
+        _render_email_login_flow()
+
+
+def _render_email_login_flow():
+    """Email 登入兩階段：輸 email 寄碼 → 輸碼登入。state 在 session_state。"""
+    step = st.session_state.get("email_login_step", "request")
+
+    if step == "verify":
+        target_email = st.session_state.get("email_login_email", "")
+        st.success(
+            f"✉️ 驗證碼已寄到 **{target_email}**，10 分鐘內有效。"
+            f"\n\n如沒設 SMTP（dev mode），驗證碼會印在 Render Logs。"
+        )
+        with st.form("email_verify_form"):
+            code = st.text_input(
+                "6 位驗證碼",
+                max_chars=6,
+                placeholder="123456",
+                help="從信箱（或 Render Logs）複製過來",
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                verify_clicked = st.form_submit_button(
+                    "登入", type="primary", use_container_width=True
+                )
+            with c2:
+                back_clicked = st.form_submit_button(
+                    "← 換 email", use_container_width=True
+                )
+
+        if back_clicked:
+            st.session_state.email_login_step = "request"
+            st.session_state.pop("email_login_email", None)
+            st.rerun()
+
+        if verify_clicked:
+            if not code or not code.strip():
+                st.warning("請輸入驗證碼")
+                return
+            try:
+                api_client.verify_email_code(target_email, code.strip())
+            except APIError as exc:
+                st.error(f"驗證失敗：{exc.detail}")
+                return
+
+            if api_client.load_user_into_session():
+                st.session_state.authenticated = True
+                st.session_state.login_ip = get_client_ip()
+                # 清掉 email 流程暫存
+                st.session_state.pop("email_login_step", None)
+                st.session_state.pop("email_login_email", None)
+                st.success(
+                    f"歡迎，{st.session_state.user_data.get('name') or '使用者'}！"
+                )
+                st.rerun()
+            else:
+                st.error("登入成功但無法載入使用者資料，請稍後再試")
+                api_client.clear_tokens()
+        return
+
+    # step == "request"
     st.markdown(
-        "<p style='text-align:center; color:var(--text-dim); margin-bottom:18px;'>"
-        "用 LINE 帳號登入即可開始"
+        "<p style='text-align:center; color:var(--text-dim); margin:8px 0 18px;'>"
+        "輸入 email 收 6 位驗證碼，免註冊免密碼"
         "</p>",
         unsafe_allow_html=True,
     )
+    with st.form("email_request_form"):
+        email = st.text_input(
+            "Email",
+            placeholder="you@example.com",
+            help="第一次用會自動建立帳號",
+        )
+        send_clicked = st.form_submit_button(
+            "📧 寄送驗證碼", type="primary", use_container_width=True
+        )
 
-    if not api_client.get_line_channel_id():
-        st.error("尚未設定 LINE_CHANNEL_ID，請聯絡管理員。")
-        return
-
-    line_url = api_client.build_line_oauth_url()
-    st.link_button(
-        "🟢 用 LINE 登入",
-        line_url,
-        type="primary",
-        use_container_width=True,
-    )
+    if send_clicked:
+        if not email or "@" not in email:
+            st.warning("請輸入有效的 email")
+            return
+        try:
+            api_client.request_email_code(email.strip())
+        except APIError as exc:
+            st.error(f"寄送失敗：{exc.detail}")
+            return
+        st.session_state.email_login_step = "verify"
+        st.session_state.email_login_email = email.strip()
+        st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════
