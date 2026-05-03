@@ -290,6 +290,30 @@ def login_with_line_code(code: str) -> dict[str, Any]:
     return data
 
 
+def request_email_code(email: str) -> dict[str, Any]:
+    """Email passwordless 第一步：寄 6 位數驗證碼到該 email。"""
+    return api.post(
+        "/api/v1/auth/email/request-code",
+        auth=False,
+        json={"email": email},
+    )
+
+
+def verify_email_code(email: str, code: str) -> dict[str, Any]:
+    """Email passwordless 第二步：拿 code 換 JWT。成功自動存 token。"""
+    data = api.post(
+        "/api/v1/auth/email/verify-code",
+        auth=False,
+        json={"email": email, "code": code},
+    )
+    if isinstance(data, dict):
+        access = data.get("access_token")
+        refresh = data.get("refresh_token")
+        if access:
+            set_tokens(access, refresh)
+    return data
+
+
 def is_authenticated() -> bool:
     access, _ = get_tokens()
     return access is not None
