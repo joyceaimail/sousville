@@ -1,12 +1,13 @@
 """
 舒肥底家 SousVille — 遊戲化健康管理系統
 ========================================
-Streamlit + Notion API  |  BMI · TDEE · 熱量赤字 · 每日問答 · 運動紀錄 · XP 商城
+Streamlit 前端  |  BMI · TDEE · 熱量赤字 · 每日問答 · 運動紀錄 · XP 商城
+
+後端 API：sufeidijia-api（FastAPI + Supabase），預設 ``https://api.joyceaimail.org``。
 
 啟動方式：
-    export NOTION_TOKEN="ntn_..."
-    export NOTION_USERS_DB_ID="..."
-    export NOTION_DAILY_LOGS_DB_ID="..."
+    export API_BASE_URL="https://api.joyceaimail.org"   # 或自架後端
+    export GEMINI_API_KEY="..."                         # AI 食物辨識用（可選）
     streamlit run app.py
 """
 
@@ -49,16 +50,9 @@ def _get_secret(env_key):
         return ""
 
 # 使用 _get_secret 同時支援 Render 環境變數與 Streamlit Cloud secrets
-NOTION_TOKEN      = _get_secret("NOTION_TOKEN")
-USERS_DB_ID       = _get_secret("NOTION_USERS_DB_ID")
-NOTION_API_URL    = "https://api.notion.com/v1"
-DAILY_LOGS_DB_ID  = _get_secret("NOTION_DAILY_LOGS_DB_ID")
-EXERCISES_DB_ID   = _get_secret("NOTION_EXERCISES_DB_ID")
-GEMINI_API_KEY    = _get_secret("GEMINI_API_KEY")
+GEMINI_API_KEY = _get_secret("GEMINI_API_KEY")
 
-QUIZ_FILE      = Path(__file__).parent / "quiz_bank.json"
 CUSTOM_EX_FILE = Path(__file__).parent / "custom_exercises.json"
-AUTH_CACHE_FILE = Path(__file__).parent / ".auth_cache.json"
 
 # ── 品牌圖檔路徑（替換成你自己的檔案即可） ──
 LOGO_PATH  = Path(__file__).parent / "assets" / "logo.png"
@@ -738,12 +732,10 @@ def check_daily_reset():
         st.session_state.level_q_idx = 0
         st.session_state.level_correct = 0
         st.session_state.portions = {"蛋白質": 0, "全穀根莖": 0, "蔬菜": 0, "油脂": 0, "奶類": 0}
-        if st.session_state.get("user_page_id"):
-            try:
-                notion = get_notion()
-                get_or_create_daily_log(notion, st.session_state.user_page_id, today_str)
-            except Exception:
-                pass
+        try:
+            api_client.refresh_today_log_into_session()
+        except Exception:
+            pass
 
 
 def get_client_ip():
@@ -775,358 +767,14 @@ def check_ip_change():
     if not login_ip or not current_ip:
         return
     if current_ip != login_ip:
-        _clear_auth_cache()
+        try:
+            api_client.clear_tokens()
+        except Exception:
+            pass
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.warning("偵測到不同網路環境，已自動登出。請重新登入。")
         st.rerun()
-
-
-# ═══════════════════════════════════════════════════════════
-#  Notion 工具函數（相容 notion-client v2 / v3）
-# ═══════════════════════════════════════════════════════════
-
-_notion_instance = None
-
-def get_notion():
-    global _notion_instance
-    if _notion_instance is not None:
-        return _notion_instance
-    if not NOTION_TOKEN:
-        st.error("NOTION_TOKEN 尚未設定")
-        st.stop()
-    from notion_client import Client
-    _notion_instance = Client(auth=NOTION_TOKEN)
-    return _notion_instance
-
-
-def _query_db(notion, database_id, **kwargs):
-    """查詢 Notion 資料庫，相容 notion-client v2 / v3。"""
-    try:
-        return notion.databases.query(database_id=database_id, **kwargs)
-    except (AttributeError, Exception):
-        pass
-    try:
-        return notion.request(path=f"databases/{database_id}/query",
-                               method="POST", body=kwargs)
-    except Exception:
-        pass
-    import httpx
-    resp = httpx.post(
-        f"https://api.notion.com/v1/databases/{database_id}/query",
-        headers={
-            "Authorization": f"Bearer {NOTION_TOKEN}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json",
-        },
-        json=kwargs,
-    )
-    return resp.json()
-
-
-def _notion_debug_msg(err):
-    """從 Notion API 錯誤中提取完整 response.text 以供除錯。"""
-    msg = str(err)
-    resp = getattr(err, "response", None)
-    if resp is not None:
-        body = getattr(resp, "text", None) or ""
-        if body:
-            msg += f"\n\n📋 Notion 回傳：\n```\n{body}\n```"
-    return msg
-
-
-def _notion_headers():
-    return {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json",
-    }
-
-
-def _verify_db_id(db_id, label="DB"):
-    clean = db_id.replace("-", "").strip()
-    if len(clean) != 32:
-        st.error(f"⚠️ {label} ID 長度不正確：{len(clean)} 字元（應為 32）。原始值：`{db_id}`")
-        st.stop()
-    return db_id.strip()
-
-
-def find_user(notion, email):
-    db_id = _verify_db_id(USERS_DB_ID, "Users")
-    try:
-        q = _query_db(notion, db_id, filter={
-            "property": "電子郵件", "email": {"equals": email},
-        })
-        results = q.get("results", [])
-        return results[0] if results else None
-    except Exception as e:
-        st.error(_notion_debug_msg(e))
-        return None
-
-
-def deduplicate_users(notion, email):
-    """查 Notion 中同信箱的重複使用者，保留最新一筆，其餘歸檔刪除。"""
-    db_id = _verify_db_id(USERS_DB_ID, "Users")
-    try:
-        q = _query_db(notion, db_id, filter={
-            "property": "電子郵件", "email": {"equals": email}},
-            sorts=[{"timestamp": "created_time", "direction": "descending"}],
-        )
-        dupes = q.get("results", [])
-    except Exception:
-        return
-    if len(dupes) <= 1:
-        return
-    for page in dupes[1:]:
-        try:
-            notion.pages.update(page_id=page["id"], properties={"archived": {"checkbox": True}})
-        except Exception:
-            pass
-
-
-def _save_auth_cache(email, page_id):
-    AUTH_CACHE_FILE.write_text(
-        json.dumps({"email": email, "page_id": page_id}, ensure_ascii=False),
-        encoding="utf-8",
-    )
-
-
-def _load_auth_cache():
-    if AUTH_CACHE_FILE.exists():
-        try:
-            data = json.loads(AUTH_CACHE_FILE.read_text(encoding="utf-8"))
-            return data.get("email"), data.get("page_id")
-        except (json.JSONDecodeError, OSError):
-            pass
-    return None, None
-
-
-def _clear_auth_cache():
-    if AUTH_CACHE_FILE.exists():
-        AUTH_CACHE_FILE.unlink()
-
-
-def create_user(notion, name, phone, email):
-    import requests as http_requests
-    db_id = _verify_db_id(USERS_DB_ID, "Users")
-
-    payload = {
-        "parent": {"database_id": db_id},
-        "properties": {
-            "姓名":       {"title": [{"text": {"content": name}}]},
-            "電子郵件":    {"email": email},
-            "總經驗值":    {"number": 0},
-            "等級":       {"number": 1},
-            "優惠券已解鎖":  {"checkbox": False},
-        },
-    }
-
-    try:
-        resp = http_requests.post(
-            f"{NOTION_API_URL}/pages",
-            headers=_notion_headers(),
-            json=payload,
-        )
-
-        if resp.status_code == 200:
-            return resp.json()
-        else:
-            st.error(f"建立帳號失敗（HTTP {resp.status_code}），請確認 Email 格式正確後重試。")
-            return None
-    except Exception as e:
-        st.error(f"建立使用者時發生網路錯誤：{e}")
-        return None
-
-
-def update_user_profile(notion, page_id, props):
-    try:
-        notion.pages.update(page_id=page_id, properties=props)
-    except Exception as e:
-        st.error(_notion_debug_msg(e))
-
-
-def get_or_create_daily_log(notion, user_page_id, date_str):
-    if (st.session_state.get("today_log_id")
-            and st.session_state.get("current_date") == date_str):
-        return None
-    try:
-        results = _query_db(notion, DAILY_LOGS_DB_ID, filter={"and": [
-            {"property": "使用者", "relation": {"contains": user_page_id}},
-            {"property": "Date", "date": {"equals": date_str}},
-        ]}).get("results", [])
-    except Exception as e:
-        st.error(_notion_debug_msg(e))
-        return None
-
-    if results:
-        log = results[0]
-        p = log["properties"]
-        st.session_state.today_cal_in  = p.get("攝取卡路里", {}).get("number", 0) or 0
-        st.session_state.today_cal_out = p.get("消耗卡路里", {}).get("number", 0) or 0
-        st.session_state.today_quiz_xp = p.get("獲得經驗值", {}).get("number", 0) or 0
-        st.session_state.daily_quiz_done = p.get("問答完成", {}).get("checkbox", False) or False
-        st.session_state.today_log_id = log["id"]
-
-        meal_text = p.get("飲食紀錄", {}).get("rich_text", [])
-        if meal_text and meal_text[0].get("plain_text", "").strip():
-            st.session_state.today_meals = [m.strip() for m in meal_text[0]["plain_text"].split(";") if m.strip()]
-
-        ex_text = p.get("運動紀錄", {}).get("rich_text", [])
-        if ex_text and ex_text[0].get("plain_text", "").strip():
-            st.session_state.today_exercises = [e.strip() for e in ex_text[0]["plain_text"].split(";") if e.strip()]
-
-        st.session_state.portions = {
-            "\u86cb\u767d\u8cea": p.get("\u86cb\u767d\u8cea\u4efd\u6578", {}).get("number", 0) or 0,
-            "\u852c\u83dc": p.get("\u852c\u83dc\u4efd\u6578", {}).get("number", 0) or 0,
-            "\u6cb9\u8102": p.get("\u6cb9\u8102\u4efd\u6578", {}).get("number", 0) or 0,
-            "\u5976\u985e": p.get("\u5976\u985e\u4efd\u6578", {}).get("number", 0) or 0,
-        }
-
-        return log
-
-    try:
-        new_log = notion.pages.create(
-            parent={"database_id": DAILY_LOGS_DB_ID},
-            properties={
-                "Date":       {"date": {"start": date_str}},
-                "使用者":     {"relation": [{"id": user_page_id}]},
-                "攝取卡路里":  {"number": 0},
-                "消耗卡路里":  {"number": 0},
-                "獲得經驗值":  {"number": 0},
-                "問答完成":    {"checkbox": False},
-                "飲食紀錄":    {"rich_text": [{"text": {"content": ""}}]},
-                "運動紀錄":    {"rich_text": [{"text": {"content": ""}}]},
-                "\u86cb\u767d\u8cea\u4efd\u6578":  {"number": 0},
-                "\u852c\u83dc\u4efd\u6578":    {"number": 0},
-                "\u6cb9\u8102\u4efd\u6578":    {"number": 0},
-                "\u5976\u985e\u4efd\u6578":    {"number": 0},
-                "\u7b54\u984c\u5167\u5bb9":    {"rich_text": [{"text": {"content": ""}}]},
-            },
-        )
-    except Exception as e:
-        st.error(_notion_debug_msg(e))
-        return None
-    st.session_state.today_cal_in = 0
-    st.session_state.today_cal_out = 0
-    st.session_state.today_quiz_xp = 0
-    st.session_state.daily_quiz_done = False
-    st.session_state.today_log_id = new_log["id"]
-    return new_log
-
-
-def patch_daily_log(notion, log_id, props):
-    if not log_id:
-        return
-    try:
-        notion.pages.update(page_id=log_id, properties=props)
-    except Exception as e:
-        st.error(_notion_debug_msg(e))
-
-
-def query_weight_history(notion, user_page_id, days=30):
-    if "weight_history" in st.session_state:
-        return st.session_state.weight_history
-    start = (taiwan_today() - timedelta(days=days - 1)).isoformat()
-    end = taiwan_today().isoformat()
-    entries = []
-    try:
-        results = _query_db(notion, DAILY_LOGS_DB_ID, filter={"and": [
-            {"property": "\u4f7f\u7528\u8005", "relation": {"contains": user_page_id}},
-            {"property": "Date", "date": {"on_or_before": end, "on_or_after": start}},
-        ]})
-        for page in results.get("results", []):
-            d = page["properties"]["Date"]["date"]["start"]
-            props = page.get("properties", {})
-            w = None
-            if "\u9ad4\u91cd" in props and props["體重"].get("number") is not None:
-                w = props["體重"]["number"]
-            if w is not None:
-                entries.append((d, w))
-    except Exception:
-        pass
-    entries.sort(key=lambda x: x[0])
-    st.session_state.weight_history = entries
-    return entries
-
-
-def sync_meal_to_notion(notion, log_id, meal_name, calories):
-    if not log_id:
-        return
-    parts = st.session_state.today_meals + [meal_name]
-    new_text = "; ".join(parts)[:2000]
-    por = st.session_state.portions
-    patch_daily_log(notion, log_id, {
-        "攝取卡路里":   {"number": st.session_state.today_cal_in},
-        "飲食紀錄":     {"rich_text": [{"text": {"content": new_text}}]},
-        "\u86cb\u767d\u8cea\u4efd\u6578":  {"number": por.get("\u86cb\u767d\u8cea", 0)},
-        "\u852c\u83dc\u4efd\u6578":    {"number": por.get("\u852c\u83dc", 0)},
-        "\u6cb9\u8102\u4efd\u6578":    {"number": por.get("\u6cb9\u8102", 0)},
-        "\u5976\u985e\u4efd\u6578":    {"number": por.get("\u5976\u985e", 0)},
-    })
-
-
-def sync_exercise_to_notion(notion, log_id, exercise_name, calories):
-    if not log_id:
-        return
-    parts = st.session_state.today_exercises + [exercise_name]
-    new_text = "; ".join(parts)[:2000]
-    patch_daily_log(notion, log_id, {
-        "消耗卡路里": {"number": st.session_state.today_cal_out},
-        "運動紀錄":  {"rich_text": [{"text": {"content": new_text}}]},
-    })
-
-
-def add_user_xp(notion, user_page_id, amount):
-    new_xp = st.session_state.total_xp + amount
-    st.session_state.total_xp = new_xp
-    new_level = get_level(new_xp)
-    update_user_profile(notion, user_page_id, {
-        "總經驗值": {"number": new_xp},
-        "等級":   {"number": new_level},
-    })
-    if new_xp >= 500 and not st.session_state.coupon_unlocked:
-        st.session_state.coupon_unlocked = True
-        update_user_profile(notion, user_page_id, {"優惠券已解鎖": {"checkbox": True}})
-        return True
-    return False
-
-
-def calc_streak(notion, user_page_id):
-    if "streak" in st.session_state and "streak_date" in st.session_state:
-        if st.session_state.streak_date == str(taiwan_today()):
-            return
-    start = (taiwan_today() - timedelta(days=60)).isoformat()
-    try:
-        results = _query_db(notion, DAILY_LOGS_DB_ID, filter={"and": [
-            {"property": "使用者", "relation": {"contains": user_page_id}},
-            {"property": "Date", "date": {"on_or_after": start}},
-        ]}).get("results", [])
-    except Exception:
-        st.session_state.streak = 0
-        st.session_state.streak_date = str(taiwan_today())
-        return
-
-    date_set = set()
-    for page in results:
-        d = page["properties"]["Date"]["date"]["start"]
-        p = page["properties"]
-        has = (
-            (p.get("攝取卡路里", {}).get("number", 0) or 0) > 0
-            or (p.get("消耗卡路里", {}).get("number", 0) or 0) > 0
-        )
-        if has:
-            date_set.add(d)
-
-    streak = 0
-    check = taiwan_today() - timedelta(days=1)
-    for _ in range(60):
-        if str(check) in date_set:
-            streak += 1
-            check -= timedelta(days=1)
-        else:
-            break
-    st.session_state.streak = streak
-    st.session_state.streak_date = str(taiwan_today())
 
 
 # ─── 自訂運動 ───
@@ -1136,21 +784,10 @@ def merge_exercises():
 
 
 def add_custom_exercise(name, met, category="自訂"):
+    """新增 / 更新本地自訂運動清單（後端目前不存運動字典；純 client side）。"""
+    del category  # 保留 signature 相容；目前只本地存
     st.session_state.custom_exercises[name] = met
     _save_local_custom_exercises(st.session_state.custom_exercises)
-    if EXERCISES_DB_ID:
-        try:
-            notion = get_notion()
-            notion.pages.create(
-                parent={"database_id": EXERCISES_DB_ID},
-                properties={
-                    "Name": {"title": [{"text": {"content": name}}]},
-                    "MET":  {"number": met},
-                    "Category": {"select": {"name": category}},
-                },
-            )
-        except Exception:
-            pass
 
 
 def delete_custom_exercise(name):
@@ -1485,7 +1122,10 @@ def render_sidebar():
 
     st.markdown("---")
     if st.button("&#30331;&#20986;", use_container_width=True, type="secondary"):
-        _clear_auth_cache()
+        try:
+            api_client.clear_tokens()
+        except Exception:
+            pass
         for key in list(st.session_state.keys()):
             del st.session_state[key]
         st.rerun()
@@ -1516,65 +1156,6 @@ def render_coupon_popup():
 # ═══════════════════════════════════════════════════════════
 #  頁面：身份驗證
 # ═══════════════════════════════════════════════════════════
-
-def _parse_user_props(p):
-    """從 Notion page properties 解析出 user_data dict，包含 TDEE/BMR/BMI/target。"""
-    data = {
-        "name":  p["姓名"]["title"][0]["text"]["content"],
-        "phone": p.get("電話", {}).get("phone_number", ""),
-        "email": p["電子郵件"]["email"],
-        "gender":   p.get("性別", {}).get("select", {}).get("name", ""),
-        "age":      p.get("年齡", {}).get("number"),
-        "height":   p.get("身高", {}).get("number"),
-        "weight":   p.get("體重", {}).get("number"),
-        "activity": p.get("活動程度", {}).get("select", {}).get("name", ""),
-        "goal":     p.get("目標", {}).get("select", {}).get("name", ""),
-        "bmi":      p.get("BMI", {}).get("number"),
-        "bmr":      p.get("BMR", {}).get("number"),
-        "tdee":     p.get("TDEE", {}).get("number"),
-        "target":   p.get("目標卡路里", {}).get("number"),
-        "total_xp": p.get("總經驗值", {}).get("number", 0) or 0,
-        "level":    p.get("等級", {}).get("number", 1) or 1,
-        "coupon":   p.get("優惠券已解鎖", {}).get("checkbox", False) or False,
-    }
-    gp_text = p.get("遊戲進度", {}).get("rich_text", [])
-    if gp_text and gp_text[0].get("plain_text", "").strip():
-        try:
-            data["game_progress"] = json.loads(gp_text[0]["plain_text"])
-        except (json.JSONDecodeError, KeyError):
-            data["game_progress"] = {}
-    gh = p.get("遊戲生命", {}).get("number")
-    if gh is not None:
-        data["game_hearts"] = gh
-    return data
-
-
-def _apply_user_session(user_data):
-    """將 user_data 寫入 session_state 並判斷 profile 是否完整。"""
-    st.session_state.user_data = user_data
-    st.session_state.total_xp = user_data["total_xp"]
-    st.session_state.coupon_unlocked = user_data["coupon"]
-    if user_data.get("height") and user_data.get("weight"):
-        st.session_state.profile_complete = True
-    # Load game progress from Notion if available
-    if user_data.get("game_progress") and isinstance(user_data["game_progress"], dict):
-        st.session_state.game_progress = user_data["game_progress"]
-    if user_data.get("game_hearts") is not None:
-        st.session_state.game_hearts = user_data["game_hearts"]
-
-
-def _restore_user_session(notion, page_id):
-    """從 Notion page_id 載入使用者資料到 session state，回傳成功與否。"""
-    try:
-        page = notion.pages.retrieve(page_id=page_id)
-        if page.get("archived"):
-            return False
-        st.session_state.user_page_id = page_id
-        _apply_user_session(_parse_user_props(page["properties"]))
-        return True
-    except Exception:
-        return False
-
 
 def page_auth():
     """LINE Login OAuth 流程 — 已從舊版 email/Notion 切換到新後端 API。"""
@@ -1739,7 +1320,7 @@ def _render_email_login_flow():
 #  頁面：個人設定
 # ═══════════════════════════════════════════════════════════
 
-def page_profile(notion):
+def page_profile():
     st.markdown("## ⚙️ 個人資料與體態設定", unsafe_allow_html=True)
     ud = st.session_state.user_data
 
@@ -1772,18 +1353,32 @@ def page_profile(notion):
         tdee = calc_tdee(bmr, ACTIVITY_LEVELS[activity])
         target = calc_target(tdee, GOAL_MULTIPLIERS[goal])
 
-        update_user_profile(notion, st.session_state.user_page_id, {
-            "性別":       {"select": {"name": gender}},
-            "年齡":       {"number": int(float(age))},
-            "身高":       {"number": float(height)},
-            "體重":       {"number": float(weight)},
-            "BMI":        {"number": bmi},
-            "BMR":        {"number": round(bmr)},
-            "TDEE":       {"number": tdee},
-            "目標卡路里":   {"number": target},
-            "活動程度":    {"select": {"name": activity}},
-            "目標":       {"select": {"name": goal}},
-        })
+        # 把年齡 → birth_date（取當年 1/1，後端只用來算 age）
+        try:
+            today_d = taiwan_today()
+            birth_iso = f"{today_d.year - int(float(age))}-01-01"
+        except Exception:
+            birth_iso = None
+
+        try:
+            updates = {
+                "gender": gender,
+                "height_cm": float(height),
+                "weight_kg": float(weight),
+                "activity_level": activity,
+                "goal": goal,
+            }
+            if birth_iso:
+                updates["birth_date"] = birth_iso
+            api_client.update_profile(updates)
+            # 體重變動 → 寫入 weight_history（後端會 dedupe 同日）
+            try:
+                api_client.record_weight(float(weight))
+            except APIError:
+                pass
+        except APIError as exc:
+            st.error(f"儲存失敗：{exc.detail}")
+            return
 
         st.session_state.user_data.update({
             "gender": gender, "age": int(float(age)),
@@ -1795,18 +1390,8 @@ def page_profile(notion):
         st.session_state.profile_complete = True
         st.success("資料已儲存！")
 
-        try:
-            if not st.session_state.get("today_log_id"):
-                get_or_create_daily_log(notion, st.session_state.user_page_id, str(taiwan_today()))
-            if st.session_state.get("today_log_id"):
-                try:
-                    notion.pages.update(page_id=st.session_state.today_log_id, properties={
-                        "\u9ad4\u91cd": {"number": float(weight)},
-                    })
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        # 重新拉今日 log，讓 BMR/TDEE/target 由後端計算覆蓋本地估算
+        api_client.refresh_today_log_into_session()
         st.session_state.pop("weight_history", None)
 
     if st.session_state.profile_complete and ud.get("tdee"):
@@ -1863,7 +1448,18 @@ def page_profile(notion):
     if st.session_state.profile_complete and ud.get("tdee"):
         st.markdown("---")
         st.markdown("### 📈 體重趨勢")
-        history = query_weight_history(notion, st.session_state.user_page_id, days=30)
+        try:
+            history_raw = api_client.list_weight_history(limit=30)
+        except APIError:
+            history_raw = []
+        # 後端回 [{recorded_date, weight_kg}, ...]；轉成舊版 [(date_str, kg), ...]
+        history = []
+        for item in history_raw:
+            d = item.get("recorded_date") or item.get("date")
+            w = item.get("weight_kg") or item.get("weight")
+            if d and w is not None:
+                history.append((str(d), float(w)))
+        history.sort(key=lambda x: x[0])
         if history:
             st.markdown(_render_weight_chart(history, width=800, height=300), unsafe_allow_html=True)
             mood = get_weight_trend_mood(history)
@@ -1880,81 +1476,42 @@ def page_profile(notion):
         else:
             st.info("調整體重後會自動記錄，累積資料後會顯示趨勢圖。")
 
-def _load_quiz_bank():
-    if not QUIZ_FILE.exists():
-        return None
-    with open(QUIZ_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _get_all_levels(quiz_bank):
-    levels = []
-    for ch in quiz_bank["chapters"]:
-        for lv in ch["levels"]:
-            levels.append(lv)
-    return levels
-
-
-def _get_next_level(quiz_bank, completed):
-    for ch in quiz_bank["chapters"]:
+def _get_next_level(chapters_data, completed):
+    """Walk API ``chapters_data`` and return the first level not yet completed."""
+    for ch in chapters_data:
         for lv in ch["levels"]:
             if lv["id"] not in completed:
                 return lv
     return None
 
 
-def _save_game_progress(notion, user_page_id):
-    gp = st.session_state.game_progress
-    gp["hearts"] = st.session_state.game_hearts
-    gp["total_game_xp"] = gp.get("total_game_xp", 0)
-    try:
-        update_user_profile(notion, user_page_id, {
-            "遊戲進度": {"rich_text": [{"text": {"content": json.dumps(gp, ensure_ascii=False)}}]},
-            "遊戲生命": {"number": st.session_state.game_hearts},
-        })
-    except Exception:
-        pass
-
-
-def _check_hearts_regen():
-    rt = st.session_state.hearts_regen_time
-    if rt is None or st.session_state.game_hearts >= 5:
-        return
-    now = datetime.now(TAIPEI_TZ)
-    elapsed = (now - rt).total_seconds() / 60
-    regen_count = int(elapsed / 30)
-    if regen_count > 0:
-        st.session_state.game_hearts = min(5, st.session_state.game_hearts + regen_count)
-        if st.session_state.game_hearts >= 5:
-            st.session_state.hearts_regen_time = None
-        else:
-            st.session_state.hearts_regen_time = rt + timedelta(minutes=regen_count * 30)
-
-
 def _render_hearts_bar():
-    full = st.session_state.game_hearts
+    full = int(st.session_state.get("game_hearts", 0) or 0)
+    full = max(0, min(5, full))
     empty = 5 - full
     hearts_html = '<div class="game-hearts-bar">'
     hearts_html += '<span class="heart-full">' + '❤️' * full + '</span>'
     hearts_html += '<span class="heart-empty">' + '🖤' * empty + '</span>'
-    rt = st.session_state.hearts_regen_time
-    if rt and full < 5:
-        now = datetime.now(TAIPEI_TZ)
-        mins_left = max(0, 30 - int((now - rt).total_seconds() / 60))
-        hearts_html += f'<span style="font-size:.75rem; color:var(--text-dim); margin-left:6px;">{mins_left}分鐘後恢復 1 顆</span>'
+    secs_left = int(st.session_state.get("hearts_seconds_to_next_regen", 0) or 0)
+    if full < 5 and secs_left > 0:
+        mins_left = max(1, int(secs_left / 60))
+        hearts_html += (
+            f'<span style="font-size:.75rem; color:var(--text-dim); margin-left:6px;">'
+            f'{mins_left}分鐘後恢復 1 顆</span>'
+        )
     hearts_html += '</div>'
     st.markdown(hearts_html, unsafe_allow_html=True)
 
 
-def _render_game_map(quiz_bank):
+def _render_game_map(chapters_data):
     completed = set(st.session_state.game_progress.get("completed", []))
-    next_lv = _get_next_level(quiz_bank, completed)
+    next_lv = _get_next_level(chapters_data, completed)
     next_id = next_lv["id"] if next_lv else None
 
     nodes_per_row = 5
     map_html = '<div class="game-map">'
 
-    for ch in quiz_bank["chapters"]:
+    for ch in chapters_data:
         map_html += f'<div class="game-chapter-label">{ch["icon"]} {ch["title"]}</div>'
         ch_levels = ch["levels"]
         for row_start in range(0, len(ch_levels), nodes_per_row):
@@ -1987,10 +1544,11 @@ def _render_game_map(quiz_bank):
     st.markdown(map_html, unsafe_allow_html=True)
 
 
-def _render_level_stats(quiz_bank):
+def _render_level_stats(chapters_data):
     completed = set(st.session_state.game_progress.get("completed", []))
-    total_levels = sum(len(ch["levels"]) for ch in quiz_bank["chapters"])
-    done_count = len(completed & {lv["id"] for ch in quiz_bank["chapters"] for lv in ch["levels"]})
+    all_ids = {lv["id"] for ch in chapters_data for lv in ch["levels"]}
+    total_levels = len(all_ids)
+    done_count = len(completed & all_ids)
     total_game_xp = st.session_state.game_progress.get("total_game_xp", 0)
     pct = int(done_count / max(1, total_levels) * 100)
 
@@ -2004,42 +1562,49 @@ def _render_level_stats(quiz_bank):
     st.markdown(stats_html, unsafe_allow_html=True)
 
 
-def tab_daily_challenge(notion):
+def tab_daily_challenge():
     st.markdown("### 🎯 關卡挑戰", unsafe_allow_html=True)
 
-    quiz_bank = _load_quiz_bank()
-    if not quiz_bank:
-        st.error("找不到 quiz_bank.json")
+    # 跟後端拉最新 game state（hearts / xp / completed_levels / regen 倒數）
+    api_client.refresh_game_state_into_session()
+
+    try:
+        chapters_resp = api_client.get_chapters()
+    except APIError as exc:
+        st.error(f"無法載入關卡：{exc.detail}")
+        return
+
+    chapters_data = chapters_resp.get("chapters", []) if isinstance(chapters_resp, dict) else chapters_resp
+    if not chapters_data:
+        st.info("目前還沒有關卡資料。")
         return
 
     completed = set(st.session_state.game_progress.get("completed", []))
-    _check_hearts_regen()
 
     # ── STATE: playing a level ──
-    if st.session_state.current_level is not None:
-        _play_level(notion, quiz_bank)
+    if st.session_state.get("current_level") is not None:
+        _play_level(chapters_data)
         return
 
     # ── STATE: map view ──
-    _render_level_stats(quiz_bank)
+    _render_level_stats(chapters_data)
     _render_hearts_bar()
 
-    # Refill hearts button
+    # Refill hearts via API (花 10 XP)
     if st.session_state.game_hearts < 5 and st.session_state.total_xp >= 10:
         if st.button("💔 花 10 XP 補滿 ❤️×5", use_container_width=True):
-            st.session_state.total_xp -= 10
-            st.session_state.game_hearts = 5
-            st.session_state.hearts_regen_time = None
-            update_user_profile(notion, st.session_state.user_page_id, {
-                "總經驗值": {"number": st.session_state.total_xp},
-            })
-            _save_game_progress(notion, st.session_state.user_page_id)
+            try:
+                api_client.refill_hearts()
+            except APIError as exc:
+                st.error(f"補血失敗：{exc.detail}")
+                return
+            api_client.refresh_game_state_into_session()
             st.rerun()
 
     st.markdown("---")
-    _render_game_map(quiz_bank)
+    _render_game_map(chapters_data)
 
-    next_lv = _get_next_level(quiz_bank, completed)
+    next_lv = _get_next_level(chapters_data, completed)
     if next_lv:
         if st.session_state.game_hearts <= 0:
             st.warning("❤️ 生命值已用完！請等待恢復或花 10 XP 補滿。")
@@ -2051,31 +1616,33 @@ def tab_daily_challenge(notion):
                 st.session_state.current_level = next_lv["id"]
                 st.session_state.level_q_idx = 0
                 st.session_state.level_correct = 0
+                st.session_state.level_answers = []
+                st.session_state.pop("current_level_data", None)
                 st.rerun()
     else:
-        st.markdown("""
+        st.markdown('''
         <div class="quiz-card" style="text-align:center; padding:44px;">
           <div style="font-size:3rem; margin-bottom:10px;">🏆</div>
           <h3 style="color:#FFB300;">恭喜全部通關！</h3>
           <p style="color:var(--text-dim);">你是健康知識達人！</p>
-        </div>""", unsafe_allow_html=True)
+        </div>''', unsafe_allow_html=True)
 
 
-def _play_level(notion, quiz_bank):
+def _play_level(chapters_data):
     level_id = st.session_state.current_level
-    level = None
-    for ch in quiz_bank["chapters"]:
-        for lv in ch["levels"]:
-            if lv["id"] == level_id:
-                level = lv
-                break
-        if level:
-            break
-    if not level:
-        st.session_state.current_level = None
-        return
 
-    questions = level["questions"]
+    # 載一次該關完整題目（含答案 + 解釋）並 cache 在 session_state
+    level = st.session_state.get("current_level_data")
+    if not level or level.get("id") != level_id:
+        try:
+            level = api_client.get_level(int(level_id))
+        except APIError as exc:
+            st.error(f"無法載入關卡：{exc.detail}")
+            st.session_state.current_level = None
+            return
+        st.session_state.current_level_data = level
+
+    questions = level.get("questions") or []
     q_idx = st.session_state.level_q_idx
     total_q = len(questions)
 
@@ -2099,7 +1666,7 @@ def _play_level(notion, quiz_bank):
     _render_hearts_bar()
 
     if q_idx >= total_q:
-        _finish_level(notion, quiz_bank, level)
+        _finish_level(level)
         return
 
     q = questions[q_idx]
@@ -2117,51 +1684,54 @@ def _play_level(notion, quiz_bank):
 
     if st.button("確認答案", type="primary", use_container_width=True,
                  key=f"game_btn_{q_idx}"):
-        correct = selected == q["answer"]
-        if correct:
+        # 紀錄答案，最後 submit 一次
+        answers_so_far = list(st.session_state.get("level_answers") or [])
+        answers_so_far.append(int(selected))
+        st.session_state.level_answers = answers_so_far
+
+        is_correct = (selected == q["answer"])
+        if is_correct:
             st.session_state.level_correct += 1
             st.success(f"✅ 正確！{q['explanation']}")
         else:
-            st.session_state.game_hearts = max(0, st.session_state.game_hearts - 1)
-            if st.session_state.game_hearts <= 0:
-                st.session_state.hearts_regen_time = datetime.now(TAIPEI_TZ)
+            # 本地 hearts 顯示先扣（後端 submit 時還會做一次權威結算）
+            st.session_state.game_hearts = max(0, int(st.session_state.game_hearts) - 1)
             st.error(f"❌ 答錯了！正確答案：{q['options'][q['answer']]}")
             st.markdown(f"📖 {q['explanation']}")
-            if st.session_state.game_hearts <= 0:
-                st.session_state.current_level = None
-                _save_game_progress(notion, st.session_state.user_page_id)
-                st.rerun()
-                return
 
         st.session_state.level_q_idx = q_idx + 1
         st.rerun()
 
 
-def _finish_level(notion, quiz_bank, level):
-    correct = st.session_state.level_correct
-    total_q = len(level["questions"])
-    passed = correct >= 3  # Need 3/5 correct to pass
-    is_boss = level.get("boss", False)
-    reward = level["reward_xp"]
+def _finish_level(level):
+    answers = list(st.session_state.get("level_answers") or [])
+    if not answers:
+        st.session_state.current_level = None
+        st.rerun()
+        return
+
+    try:
+        result = api_client.submit_level(int(level["id"]), answers)
+    except APIError as exc:
+        st.error(f"提交失敗：{exc.detail}")
+        return
+
+    # 把後端結果寫進 session_state（權威來源）
+    correct = int(result.get("correct_count", 0))
+    total_q = int(result.get("total_questions", len(answers)))
+    passed = bool(result.get("passed"))
+    reward = int(result.get("reward_xp", 0) or 0)
+    is_boss = bool(result.get("boss_completed"))
+    new_hearts = result.get("hearts")
+    if new_hearts is not None:
+        st.session_state.game_hearts = int(new_hearts)
+
+    # 同步整個 game state（completed_levels / xp / level / 倒數秒數）
+    api_client.refresh_game_state_into_session()
 
     if passed:
-        gp = st.session_state.game_progress
-        gp.setdefault("completed", []).append(level["id"])
-        gp["completed"] = list(set(gp["completed"]))
-        gp["total_game_xp"] = gp.get("total_game_xp", 0) + reward
-        st.session_state.game_progress = gp
         st.session_state.daily_quiz_done = True
         st.session_state.today_quiz_xp = reward
-
-        unlocked = add_user_xp(notion, st.session_state.user_page_id, reward)
-
-        if st.session_state.today_log_id:
-            patch_daily_log(notion, st.session_state.today_log_id, {
-                "問答完成": {"checkbox": True},
-                "獲得經驗值": {"number": reward},
-            })
-
-        _save_game_progress(notion, st.session_state.user_page_id)
 
         boss_text = " 👑 BOSS 通過！" if is_boss else ""
         st.markdown(f'''
@@ -2178,14 +1748,10 @@ def _finish_level(notion, quiz_bank, level):
         </div>''', unsafe_allow_html=True)
         st.balloons()
 
-        if is_boss:
+        # BOSS 通過 → 後端可能發了折扣碼，跳優惠券 popup
+        issued = result.get("discount_code_issued")
+        if is_boss or issued:
             st.session_state.coupon_unlocked = True
-            update_user_profile(notion, st.session_state.user_page_id, {
-                "優惠券已解鎖": {"checkbox": True},
-            })
-            render_coupon_popup()
-        elif unlocked:
-            st.markdown("<br>", unsafe_allow_html=True)
             render_coupon_popup()
     else:
         st.markdown(f'''
@@ -2200,6 +1766,8 @@ def _finish_level(notion, quiz_bank, level):
 
     if st.button("← 返回地圖", use_container_width=True):
         st.session_state.current_level = None
+        st.session_state.pop("current_level_data", None)
+        st.session_state.pop("level_answers", None)
         st.rerun()
 
 
@@ -2207,7 +1775,7 @@ def _finish_level(notion, quiz_bank, level):
 #  Tab 2：飲食紀錄
 # ═══════════════════════════════════════════════════════════
 
-def tab_diet_record(notion):
+def tab_diet_record():
     st.markdown("### &#127869;&#65039; 飲食紀錄", unsafe_allow_html=True)
 
     ud = st.session_state.user_data
@@ -2268,13 +1836,19 @@ def tab_diet_record(notion):
 
                 if st.button("確認紀錄", type="primary", use_container_width=True):
                     cal_int = int(cal_val)
-                    st.session_state.today_cal_in += cal_int
-                    log_text = f"{food_name} ({cal_int} kcal)"
-                    st.session_state.today_meals.append(log_text)
-                    sync_meal_to_notion(notion, st.session_state.today_log_id,
-                                        food_name, cal_int)
+                    try:
+                        api_client.create_meal(
+                            meal_type="snack",
+                            name=food_name,
+                            calories=cal_int,
+                            source="gemini",
+                        )
+                    except APIError as exc:
+                        st.error(f"紀錄失敗：{exc.detail}")
+                        return
                     st.session_state.pop("ai_result", None)
-                    st.success(f"已紀錄：{log_text} ✅")
+                    api_client.refresh_today_log_into_session()
+                    st.success(f"已紀錄：{food_name} ({cal_int} kcal) ✅")
                     st.rerun()
         else:
             st.session_state.pop("ai_result", None)
@@ -2296,14 +1870,23 @@ def tab_diet_record(notion):
         c3.metric(label="油脂", value=f"{bento_fat} 茶匙")
 
         if st.button("紀錄此餐盒", type="primary", use_container_width=True):
-            st.session_state.today_cal_in += bento_cal
-            st.session_state.portions["\u852c\u83dc"] += bento_fiber
-            st.session_state.portions["\u6cb9\u8102"] += bento_fat
-            log_text = f"{bento_name} ({bento_cal} kcal)"
-            st.session_state.today_meals.append(log_text)
-            sync_meal_to_notion(notion, st.session_state.today_log_id,
-                                bento_name, bento_cal)
-            st.success(f"已紀錄：{log_text} ✅")
+            try:
+                api_client.create_meal(
+                    meal_type="snack",
+                    name=bento_name,
+                    calories=int(bento_cal),
+                    source="bento",
+                    bento_key=bento_name,
+                    portions={
+                        "蔬菜": float(bento_fiber or 0),
+                        "油脂": float(bento_fat or 0),
+                    },
+                )
+            except APIError as exc:
+                st.error(f"紀錄失敗：{exc.detail}")
+                return
+            api_client.refresh_today_log_into_session()
+            st.success(f"已紀錄：{bento_name} ({bento_cal} kcal) ✅")
             st.rerun()
 
     # ── 模式三：手動份量 ──
@@ -2339,14 +1922,20 @@ def tab_diet_record(notion):
         </div>""", unsafe_allow_html=True)
 
         if st.button("紀錄份量", type="primary", use_container_width=True):
-            st.session_state.today_cal_in += manual_cal
-            for i, k in enumerate(keys):
-                st.session_state.portions[k] += vals[i]
-            log_text = f"手動份量 ({manual_cal} kcal)"
-            st.session_state.today_meals.append(log_text)
-            sync_meal_to_notion(notion, st.session_state.today_log_id,
-                                "手動份量", manual_cal)
-            st.success(f"已紀錄：{log_text} ✅")
+            portions_payload = {keys[i]: float(vals[i]) for i in range(len(keys))}
+            try:
+                api_client.create_meal(
+                    meal_type="snack",
+                    name="手動份量",
+                    calories=int(manual_cal),
+                    source="custom",
+                    portions=portions_payload,
+                )
+            except APIError as exc:
+                st.error(f"紀錄失敗：{exc.detail}")
+                return
+            api_client.refresh_today_log_into_session()
+            st.success(f"已紀錄：手動份量 ({manual_cal} kcal) ✅")
             st.rerun()
 
     # ── 份量達成進度 ──
@@ -2374,7 +1963,7 @@ def tab_diet_record(notion):
 #  Tab 3：運動紀錄
 # ═══════════════════════════════════════════════════════════
 
-def tab_exercise_record(notion):
+def tab_exercise_record():
     st.markdown("### 🏃 運動紀錄", unsafe_allow_html=True)
 
     if not st.session_state.profile_complete:
@@ -2423,10 +2012,18 @@ def tab_exercise_record(notion):
     </div>""", unsafe_allow_html=True)
 
     if st.button("🏃 紀錄運動", type="primary", use_container_width=True):
-        st.session_state.today_cal_out += est_cal
+        try:
+            api_client.create_exercise(
+                name=ex_name,
+                met=float(met),
+                duration_min=int(duration),
+                intensity="中強度",
+            )
+        except APIError as exc:
+            st.error(f"紀錄失敗：{exc.detail}")
+            return
+        api_client.refresh_today_log_into_session()
         log_text = f"{ex_name} MET {met} {duration}分 ({est_cal} kcal)"
-        st.session_state.today_exercises.append(log_text)
-        sync_exercise_to_notion(notion, st.session_state.today_log_id, log_text, est_cal)
         st.success(f"已紀錄：{log_text} ✅")
         st.rerun()
 
@@ -2445,7 +2042,7 @@ def tab_exercise_record(notion):
 #  Tab 4：熱量赤字
 # ═# ═# ═# ═# ═# ═# ══
 
-def tab_calorie_deficit(notion):
+def tab_calorie_deficit():
     st.markdown("### ▽ 今日熱量總覽", unsafe_allow_html=True)
 
     if not st.session_state.profile_complete:
@@ -2614,56 +2211,6 @@ def page_exercise_manager():
 #  主流程
 # ═══════════════════════════════════════════════════════════
 
-def _phase2_logged_in_view():
-    """Phase 2 暫定：登入後只顯示玩家狀態 dashboard + migration 進度。
-
-    其餘 tabs（飲食 / 運動 / 熱量赤字 / 今日挑戰 / 個人資料）需要重接 API，
-    在後續 phase 一個一個 migrate。期間使用者可以登入確認 LINE 帳號 +
-    看到自己 XP / hearts / streak，這些都直接從新 API 拉。
-    """
-    _show_logo(center=True, height=100)
-
-    ud = st.session_state.user_data
-    name = ud.get("name") or "使用者"
-    st.success(f"✅ 已用 LINE 登入：**{name}**")
-
-    cols = st.columns(4)
-    cols[0].metric("XP", ud.get("total_xp", 0))
-    cols[1].metric("等級", ud.get("level", 1))
-    cols[2].metric("❤️", ud.get("game_hearts", 5))
-    completed = ud.get("game_progress", {}).get("completed", [])
-    cols[3].metric("已通關卡", f"{len(completed)} / 14")
-
-    st.divider()
-
-    st.info(
-        """
-        🚧 **API 遷徙進行中**
-
-        後端 (sufeidijia-api) 已經接好；前端的 tabs 會在後續 phase 一個一個從
-        Notion 切到新 API：
-
-        - 🍽️ 飲食紀錄 — Phase 3
-        - 🏃 運動紀錄 — Phase 3
-        - 📉 熱量赤字 — Phase 3
-        - 🎯 今日挑戰（Quiz / Duolingo 地圖）— Phase 4
-        - ⚙️ 個人資料 — Phase 3
-
-        現在你可以：登入確認帳號通、看自己 XP / hearts。tabs 之後會逐步上線。
-        """
-    )
-
-    if st.button("🚪 登出", use_container_width=True):
-        api_client.clear_tokens()
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        try:
-            st.query_params.clear()
-        except Exception:
-            pass
-        st.rerun()
-
-
 def main():
     init_session_state()
 
@@ -2671,10 +2218,53 @@ def main():
         page_auth()
         return
 
-    # Phase 2：API 模式只顯示登入確認 dashboard。
-    # 舊版的 Notion tabs 流程暫時關閉，避免 LINE 登入後撞到 Notion 連線錯誤。
-    # Phase 3+ 會把每個 tab 改寫成 API 呼叫並逐步重新打開。
-    _phase2_logged_in_view()
+    check_ip_change()
+    check_daily_reset()
+
+    # 每次 rerun 都把今日 log + 遊戲狀態同步進 session_state
+    if not st.session_state.get("today_log_id"):
+        api_client.refresh_today_log_into_session()
+
+    with st.sidebar:
+        render_sidebar()
+
+    # 子頁面：個人設定 / 運動項目管理
+    if st.session_state.get("show_profile"):
+        if st.button("← 返回首頁", key="profile_back_top"):
+            st.session_state.pop("show_profile", None)
+            st.rerun()
+        page_profile()
+        return
+
+    if st.session_state.get("show_exercise_mgr"):
+        if st.button("← 返回首頁", key="exmgr_back_top"):
+            st.session_state.pop("show_exercise_mgr", None)
+            st.rerun()
+        page_exercise_manager()
+        return
+
+    # Profile 沒填完 → 強制先導去個人設定頁
+    if not st.session_state.profile_complete:
+        st.warning("第一次登入，請先完成「個人設定」（身高 / 體重 / 目標）。")
+        page_profile()
+        return
+
+    render_top_dashboard()
+
+    tabs = st.tabs([
+        "🍽️ 飲食紀錄",
+        "🏃 運動紀錄",
+        "📉 熱量赤字",
+        "🎯 今日挑戰",
+    ])
+    with tabs[0]:
+        tab_diet_record()
+    with tabs[1]:
+        tab_exercise_record()
+    with tabs[2]:
+        tab_calorie_deficit()
+    with tabs[3]:
+        tab_daily_challenge()
 
 
 if __name__ == "__main__":
