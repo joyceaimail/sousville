@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sousville.sync</string>
+
+    <!-- 安裝腳本會把 ${...} 替換成實際絕對路徑 + python -->
+    <key>WorkingDirectory</key>
+    <string>${SOUSVILLE_DIR}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>${PYTHON_BIN}</string>
+        <string>${SOUSVILLE_DIR}/scripts/sync_from_cloud.py</string>
+        <string>--quiet</string>
+    </array>
+
+    <!-- 從 SousVille/.env 讀環境變數（plist 不能 source .env，要把值複製進來） -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SUPABASE_URL</key>
+        <string>${SUPABASE_URL}</string>
+        <key>SUPABASE_SERVICE_KEY</key>
+        <string>${SUPABASE_SERVICE_KEY}</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+
+    <!-- 每小時整點 + 開機後立刻補一次（launchd 預設不補；要 RunAtLoad）-->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 同時只允許一個 instance（防併發） -->
+    <key>AbandonProcessGroup</key>
+    <false/>
+
+    <!-- log 寫到 SousVille/data/sync.log -->
+    <key>StandardOutPath</key>
+    <string>${SOUSVILLE_DIR}/data/sync.log</string>
+    <key>StandardErrorPath</key>
+    <string>${SOUSVILLE_DIR}/data/sync.log</string>
+
+    <!-- 跑太快避免（launchd 預設 10 秒；保險寫進來） -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>
