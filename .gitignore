@@ -1,2 +1,14 @@
 .auth_cache.json
 .env
+.DS_Store
+
+# 本機 SQLite 鏡像（每小時從 Supabase 拉，含個資不能上 git）
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/

@@ -1,135 +1,68 @@
-"""
-舒肥底家 SousVille — 管理後台
-==============================
-Streamlit + Supabase REST API + Notion API
+"""舒肥底家 SousVille — 管理後台
 
-啟動方式：
+架構：
+- **讀**：從本機 SQLite 鏡像（``data/sousville.db``）— 由 ``scripts/sync_from_cloud.py``
+  每小時透過 launchd 自動拉 Supabase 同步。
+- **寫**：write-through — 先打 Supabase（service key bypass RLS），成功後鏡到
+  本機 SQLite，避免 split-brain。
+
+啟動：
     streamlit run admin.py
+
+第一次跑：
+    cp .env.example .env && 編輯 .env 填 SUPABASE_*  + ADMIN_SECRET
+    python scripts/sync_from_cloud.py --full      # 拉全量
+    bash scripts/install_sync_schedule.sh         # 裝排程
 """
+
+from __future__ import annotations
 
 import csv
 import io
 import json
 import os
-from datetime import date
+import sys
+import subprocess
+from datetime import datetime, date, timedelta
 from pathlib import Path
 
-import requests as http_requests
 import streamlit as st
-from notion_client import Client
 
-# ═══════════════════════════════════════════════════════════
-#  常數與設定
-# ═══════════════════════════════════════════════════════════
+# ── 把專案根加到 sys.path，scripts 才匯得到 ──
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-def _env(key):
-    return os.environ.get(key, "") or st.secrets.get(key, "")
+try:
+    from dotenv import load_dotenv
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:
+    pass
 
-SUPABASE_URL    = _env("SUPABASE_URL")
-SUPABASE_KEY    = _env("SUPABASE_SERVICE_KEY")
-NOTION_TOKEN    = _env("NOTION_TOKEN")
-NOTION_USERS_DB = _env("NOTION_USERS_DB_ID")
-ADMIN_SECRET    = _env("ADMIN_SECRET")
-
-QUIZ_FILE = Path(__file__).parent / "quiz_bank.json"
-LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
-
-NOTION_API_URL = "https://api.notion.com/v1"
-
-
-# ── Supabase REST helpers ──
-
-def _sb_headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation",
-    }
-
-def sb_get(table, columns="*", order=None, limit=500, **filters):
-    url = f"{SUPABASE_URL}/rest/v1/{table}?select={columns}&limit={limit}"
-    for k, v in filters.items():
-        if v is not None:
-            url += f"&{k}=eq.{v}"
-    if order:
-        url += f"&order={order}"
-    resp = http_requests.get(url, headers=_sb_headers(), timeout=15)
-    resp.raise_for_status()
-    return resp.json()
-
-def sb_post(table, data):
-    resp = http_requests.post(
-        f"{SUPABASE_URL}/rest/v1/{table}",
-        headers=_sb_headers(), json=data, timeout=15,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-def sb_patch(table, row_id, data):
-    headers = {**_sb_headers()}
-    headers["Prefer"] = "return=representation"
-    resp = http_requests.patch(
-        f"{SUPABASE_URL}/rest/v1/{table}?id=eq.{row_id}",
-        headers=headers, json=data, timeout=15,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-def sb_delete(table, row_id):
-    resp = http_requests.delete(
-        f"{SUPABASE_URL}/rest/v1/{table}?id=eq.{row_id}",
-        headers=_sb_headers(), timeout=15,
-    )
-    resp.raise_for_status()
-
-
-# ── Notion helpers ──
-
-def _notion_headers():
-    return {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": "2022-06-28",
-        "Content-Type": "application/json",
-    }
-
-def get_notion():
-    if not NOTION_TOKEN:
-        st.error("NOTION_TOKEN 尚未設定")
-        st.stop()
-    return Client(auth=NOTION_TOKEN)
-
-def fetch_all_users():
-    """從 Notion Users DB 抓取所有會員。"""
-    if not NOTION_TOKEN or not NOTION_USERS_DB:
-        return []
-    notion = get_notion()
-    results = []
-    has_more = True
-    cursor = None
-    while has_more:
-        kw = {"database_id": NOTION_USERS_DB, "page_size": 100}
-        if cursor:
-            kw["start_cursor"] = cursor
-        resp = notion.databases.query(**kw)
-        results.extend(resp.get("results", []))
-        has_more = resp.get("has_more", False)
-        cursor = resp.get("next_cursor")
-    return [p for p in results if not p.get("archived")]
-
-def parse_user(page):
-    props = page["properties"]
-    return {
-        "id": page["id"],
-        "name": (props.get("姓名", {}).get("title") or [{}])[0].get("text", {}).get("content", ""),
-        "email": props.get("電子郵件", {}).get("email", ""),
-        "phone": props.get("電話", {}).get("phone_number", ""),
-        "created": page.get("created_time", "")[:10],
-    }
+from scripts import local_db, sync_engine  # noqa: E402
 
 
 # ═══════════════════════════════════════════════════════════
-#  頁面設定
+#  常數
+# ═══════════════════════════════════════════════════════════
+
+def _env(key: str, default: str = "") -> str:
+    val = os.environ.get(key, "")
+    if val:
+        return val
+    try:
+        return st.secrets.get(key, default)  # type: ignore[no-any-return]
+    except Exception:
+        return default
+
+
+ADMIN_SECRET = _env("ADMIN_SECRET")
+QUIZ_FILE = PROJECT_ROOT / "quiz_bank.json"
+LOGO_PATH = PROJECT_ROOT / "assets" / "logo.png"
+
+
+# ═══════════════════════════════════════════════════════════
+#  頁面設定 + CSS
 # ═══════════════════════════════════════════════════════════
 
 st.set_page_config(
@@ -140,14 +73,16 @@ st.set_page_config(
     menu_items={"Get Help": None, "Report a bug": None, "About": None},
 )
 
-st.markdown('<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Quicksand:wght@500;600;700&display=swap" rel="stylesheet">', unsafe_allow_html=True)
+st.markdown(
+    '<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Quicksand:wght@500;600;700&display=swap" rel="stylesheet">',
+    unsafe_allow_html=True,
+)
 
 st.markdown("""
 <style>
-:root { lang: "zh-TW";
+:root {
   --blue: #1B9D9E; --blue-dim: #158586; --blue-deep: #0E6E6F;
-  --blue-light: #7ED4D4; --blue-glow: rgba(27,157,158,0.22);
-  --gold: #FFB300; --gold-dim: #FF8F00;
+  --blue-light: #7ED4D4; --gold: #FFB300;
   --red: #EF5350; --green: #43A047;
   --bg: #F0F7F8; --bg-card: #FFFFFF; --text: #1A3C40;
   --text-dim: #6B9DA0; --border: rgba(27,157,158,0.12);
@@ -156,53 +91,35 @@ st.markdown("""
 [data-testid="stAppViewContainer"] { background: var(--bg); }
 [data-testid="stSidebar"] {
   background: linear-gradient(180deg, #E8F4F4 0%, #FFF 40%) !important;
-  border-right: 2px solid rgba(27,157,158,0.08) !important;
 }
-[data-testid="stSidebar"] * { color: var(--text) !important; }
 h1,h2,h3,h4 { font-family:'Noto Sans TC',sans-serif !important; color:var(--text) !important; }
-.stTabs [data-baseweb="tab-list"] { gap:6px; background:transparent; }
-.stTabs [data-baseweb="tab"] {
-  background:var(--bg-card); color:var(--text-dim); border-radius:12px;
-  padding:10px 20px; font-weight:700; border:1px solid var(--border);
-  font-family:'Noto Sans TC',sans-serif;
-}
-.stTabs [aria-selected="true"] {
-  background:linear-gradient(135deg,var(--blue),var(--blue-deep)) !important;
-  color:#fff !important; border-color:var(--blue) !important;
-}
-.stTabs [data-baseweb="tab-highlight"] { display:none; }
-.stTabs [data-baseweb="tab-content"] { background:transparent; }
 .stButton > button[kind="primary"] {
   background:linear-gradient(135deg,var(--blue),var(--blue-deep)) !important;
   border:none !important; border-radius:12px !important;
   font-weight:700 !important; color:#fff !important;
-  font-family:'Noto Sans TC',sans-serif !important;
 }
 .stButton > button[kind="secondary"] {
   border-radius:12px !important; font-weight:600 !important;
   border:1px solid var(--border) !important; color:var(--text) !important;
   background:var(--bg-card) !important;
-  font-family:'Noto Sans TC',sans-serif !important;
 }
-.card {
-  background:var(--bg-card); border-radius:16px; padding:24px;
-  border:1px solid var(--border); box-shadow:var(--shadow);
-  transition:box-shadow .3s,transform .2s;
-}
-.card:hover { box-shadow:0 6px 28px rgba(27,157,158,0.15); transform:translateY(-2px); }
 .metric-card {
   background:var(--bg-card); border-radius:16px; padding:24px 28px;
   border:1px solid var(--border); box-shadow:var(--shadow); text-align:center;
 }
 .metric-card .value { font-size:2rem; font-weight:900; font-family:'Quicksand',sans-serif; }
 .metric-card .label { font-size:.85rem; color:var(--text-dim); margin-top:4px; }
+.sync-banner {
+  background: linear-gradient(135deg, rgba(27,157,158,0.06), rgba(255,179,0,0.04));
+  border:1px solid var(--border); border-radius:12px;
+  padding:10px 16px; margin-bottom:14px; display:flex;
+  justify-content:space-between; align-items:center; font-size:.88rem;
+}
+.sync-fresh   { color: var(--green); font-weight:700; }
+.sync-stale   { color: var(--gold-dim); font-weight:700; }
+.sync-error   { color: var(--red); font-weight:700; }
 #MainMenu { visibility:hidden; }
 footer { visibility:hidden; }
-footer:after {
-  content:'© 2026 舒肥底家 SousVille 管理後台'; visibility:visible;
-  display:block; text-align:center; padding:10px;
-  color:var(--text-dim); font-size:.8rem; font-family:'Noto Sans TC',sans-serif;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -211,10 +128,9 @@ footer:after {
 #  Session State
 # ═══════════════════════════════════════════════════════════
 
-def init_state():
+def init_state() -> None:
     defaults = {
         "admin_auth": False,
-        "admin_user": "",
         "page": "dashboard",
     }
     for k, v in defaults.items():
@@ -223,10 +139,10 @@ def init_state():
 
 
 # ═══════════════════════════════════════════════════════════
-#  頁面：登入
+#  登入（單一 ADMIN_SECRET，避免再開 admin_users 表）
 # ═══════════════════════════════════════════════════════════
 
-def page_login():
+def page_login() -> None:
     st.markdown("<div style='text-align:center; padding:60px 0 20px;'>", unsafe_allow_html=True)
     if LOGO_PATH.exists():
         st.image(str(LOGO_PATH), width=120)
@@ -235,575 +151,537 @@ def page_login():
     st.markdown("""
     <div style='text-align:center; max-width:400px; margin:0 auto;'>
       <h1 style='font-size:1.6rem;'>舒肥底家 管理後台</h1>
-      <p style='color:var(--text-dim);'>請輸入管理員帳號以登入</p>
+      <p style='color:var(--text-dim);'>輸入 ADMIN_SECRET 進入</p>
     </div>
     """, unsafe_allow_html=True)
 
+    if not ADMIN_SECRET:
+        st.error(
+            "⚠️ ADMIN_SECRET 環境變數沒設。"
+            "請在 `.env` 加 `ADMIN_SECRET=...` 後重啟 admin.py。"
+        )
+        return
+
     with st.form("login_form"):
-        c1, c2 = st.columns(2)
-        with c1:
-            username = st.text_input("帳號")
-        with c2:
-            password = st.text_input("密碼", type="password")
-        secret = st.text_input("後台金鑰", type="password")
-        submitted = st.form_submit_button("登入", use_container_width=True, type="primary")
+        secret = st.text_input("ADMIN_SECRET", type="password")
+        ok = st.form_submit_button("登入", use_container_width=True, type="primary")
 
-    if submitted:
-        if not username or not password or not secret:
-            st.warning("請填寫所有欄位")
+    if ok:
+        if secret != ADMIN_SECRET:
+            st.error("金鑰錯誤")
             return
-
-        if ADMIN_SECRET and secret != ADMIN_SECRET:
-            st.error("後台金鑰錯誤")
-            return
-
-        if SUPABASE_URL:
-            try:
-                import bcrypt
-                admins = sb_get("admin_users", columns="id,username,password_hash",
-                                username=username)
-                if not admins:
-                    st.error("帳號不存在")
-                    return
-                stored_hash = admins[0].get("password_hash", "")
-                if stored_hash and not bcrypt.checkpw(password.encode(), stored_hash.encode()):
-                    st.error("密碼錯誤")
-                    return
-                st.session_state.admin_auth = True
-                st.session_state.admin_user = username
-                st.session_state.admin_role = admins[0].get("role", "admin")
-                st.rerun()
-            except ImportError:
-                st.error("缺少 bcrypt 模組，請執行 pip install bcrypt")
-            except Exception as e:
-                st.error(f"驗證失敗：{e}")
-        else:
-            st.error("SUPABASE_URL 尚未設定")
+        st.session_state.admin_auth = True
+        st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════
-#  頁面：數據總覽
+#  Sync status banner（每頁都顯示）+ 手動 Sync 按鈕
 # ═══════════════════════════════════════════════════════════
 
-def page_dashboard():
+def _format_age(iso_str: str | None) -> str:
+    if not iso_str:
+        return "（從未）"
+    try:
+        ts = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        delta = datetime.now(ts.tzinfo) - ts
+    except (ValueError, TypeError):
+        return iso_str
+    secs = int(delta.total_seconds())
+    if secs < 60:
+        return f"{secs} 秒前"
+    if secs < 3600:
+        return f"{secs // 60} 分鐘前"
+    if secs < 86400:
+        return f"{secs // 3600} 小時前"
+    return f"{secs // 86400} 天前"
+
+
+def render_sync_banner() -> None:
+    summary = local_db.sync_status_summary()
+    last = summary.get("last_run") or {}
+    status = last.get("status") or "—"
+    finished = last.get("finished_at")
+    rows = last.get("rows_pulled", 0) or 0
+
+    cls = {
+        "ok":      "sync-fresh",
+        "partial": "sync-stale",
+        "error":   "sync-error",
+    }.get(status, "sync-stale")
+
+    text = f"上次同步：<span class='{cls}'>{status.upper()}</span> · "
+    text += f"{_format_age(finished)} · 拉 {rows} 筆"
+    if last.get("error_message"):
+        text += f" · ⚠️ {last['error_message'][:80]}"
+
+    cols = st.columns([6, 2])
+    with cols[0]:
+        st.markdown(f"<div class='sync-banner'>{text}</div>", unsafe_allow_html=True)
+    with cols[1]:
+        if st.button("🔄 立刻同步", use_container_width=True, type="secondary"):
+            with st.spinner("同步中…可能需要 20–60 秒"):
+                try:
+                    result = sync_engine.pull_all()
+                    if result["status"] == "ok":
+                        st.success(f"✅ 同步完成，拉了 {result['total_rows']} 筆")
+                    else:
+                        st.warning(
+                            f"⚠️ 部分失敗（狀態 {result['status']}）："
+                            + ", ".join(f"{t}={e[:60]}" for t, e in result["errors"].items())
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"同步失敗：{exc}")
+            st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════
+#  數據總覽
+# ═══════════════════════════════════════════════════════════
+
+def page_dashboard() -> None:
     st.markdown("## 數據總覽", unsafe_allow_html=True)
+    render_sync_banner()
 
-    col1, col2, col3, col4 = st.columns(4)
+    # ── KPI 卡片 ──
+    user_count = local_db.query_one("SELECT COUNT(*) AS n FROM users")["n"]
+    today = str(date.today())
+    active_today = local_db.query_one(
+        "SELECT COUNT(DISTINCT user_id) AS n FROM daily_logs WHERE log_date = ?",
+        (today,),
+    )["n"]
+    week_ago = str(date.today() - timedelta(days=7))
+    new_users = local_db.query_one(
+        "SELECT COUNT(*) AS n FROM users WHERE created_at >= ?", (week_ago,),
+    )["n"]
+    discount_count = local_db.query_one(
+        "SELECT COUNT(*) AS n FROM user_discount_codes WHERE used_at IS NULL"
+    )["n"]
 
-    # ── 會員數（Notion）──
-    with col1:
-        try:
-            users = fetch_all_users()
-            member_count = len(users)
-        except Exception:
-            member_count = 0
-        st.markdown(f"""
-        <div class='metric-card'>
-          <div class='value' style='color:var(--blue);'>{member_count}</div>
-          <div class='label'>會員數</div>
-        </div>""", unsafe_allow_html=True)
-
-    # ── 訂單數 / 營收 / VIP（Supabase）──
-    order_count = 0
-    total_revenue = 0
-    vip_count = 0
-
-    if SUPABASE_URL:
-        try:
-            orders = sb_get("orders", columns="id,amount,status", limit=1000)
-            order_count = len(orders)
-            total_revenue = sum(
-                float(o.get("amount") or 0) for o in orders
-                if o.get("status") in ("completed", "paid", "已付款")
+    c1, c2, c3, c4 = st.columns(4)
+    for col, val, label, color in [
+        (c1, user_count,    "總會員",     "var(--blue)"),
+        (c2, active_today,  "今日活躍",   "var(--gold)"),
+        (c3, new_users,     "本週新註冊", "var(--green)"),
+        (c4, discount_count, "未用折扣碼", "var(--blue-deep)"),
+    ]:
+        with col:
+            st.markdown(
+                f"""<div class='metric-card'>
+                  <div class='value' style='color:{color};'>{val}</div>
+                  <div class='label'>{label}</div>
+                </div>""",
+                unsafe_allow_html=True,
             )
-        except Exception:
-            pass
-        try:
-            tiers = sb_get("member_tiers", columns="id", tier="VIP")
-            vip_count = len(tiers)
-        except Exception:
-            pass
-
-    with col2:
-        st.markdown(f"""
-        <div class='metric-card'>
-          <div class='value' style='color:var(--gold);'>{order_count}</div>
-          <div class='label'>訂單數</div>
-        </div>""", unsafe_allow_html=True)
-
-    with col3:
-        st.markdown(f"""
-        <div class='metric-card'>
-          <div class='value' style='color:var(--green);'>${total_revenue:,.0f}</div>
-          <div class='label'>營收</div>
-        </div>""", unsafe_allow_html=True)
-
-    with col4:
-        st.markdown(f"""
-        <div class='metric-card'>
-          <div class='value' style='color:var(--blue-deep);'>{vip_count}</div>
-          <div class='label'>VIP 會員</div>
-        </div>""", unsafe_allow_html=True)
 
     st.markdown("---")
 
-    # ── 最近訂單 ──
-    st.markdown("### 最近訂單")
-    if SUPABASE_URL:
-        try:
-            recent = sb_get("orders", order="created_at.desc", limit=10)
-            if recent:
-                for o in recent:
-                    status = o.get("status", "-")
-                    amount = float(o.get("amount") or 0)
-                    created = (o.get("created_at") or "")[:16].replace("T", " ")
-                    email = o.get("user_email", o.get("email", "-"))
-                    st.markdown(
-                        f"`{created}`  {email}  "
-                        f"**${amount:,.0f}**  "
-                        f"<span style='color:{_status_color(status)};'>{status}</span>",
-                        unsafe_allow_html=True,
-                    )
-            else:
-                st.caption("尚無訂單資料")
-        except Exception as e:
-            st.error(f"讀取訂單失敗：{e}")
-    else:
-        st.warning("SUPABASE_URL 尚未設定")
-
-
-def _status_color(status):
-    s = str(status).lower()
-    if s in ("completed", "paid", "已付款"):
-        return "var(--green)"
-    if s in ("cancelled", "已取消"):
-        return "var(--red)"
-    if s in ("pending", "pending_payment", "待付款"):
-        return "var(--gold)"
-    return "var(--text-dim)"
-
-
-# ═══════════════════════════════════════════════════════════
-#  頁面：會員管理
-# ═══════════════════════════════════════════════════════════
-
-def page_members():
-    st.markdown("## 會員管理", unsafe_allow_html=True)
-
-    if not NOTION_TOKEN or not NOTION_USERS_DB:
-        st.error("NOTION_TOKEN / NOTION_USERS_DB_ID 尚未設定")
-        return
-
-    with st.spinner("載入會員清單..."):
-        users_raw = fetch_all_users()
-    members = [parse_user(u) for u in users_raw]
-
-    # ── VIP tier 查詢 ──
-    vip_map = {}
-    if SUPABASE_URL:
-        try:
-            tiers = sb_get("member_tiers", columns="id,notion_user_id,tier,email", limit=1000)
-            for t in tiers:
-                key = t.get("notion_user_id") or t.get("email") or ""
-                vip_map[key] = t
-        except Exception:
-            pass
-
-    # ── 搜尋 ──
-    search = st.text_input("搜尋會員（姓名 / Email）", placeholder="輸入關鍵字…")
-    if search:
-        q = search.lower()
-        members = [m for m in members if q in m["name"].lower() or q in m["email"].lower()]
-
-    st.caption(f"共 {len(members)} 位會員")
-
-    # ── 列表 ──
-    for m in members:
-        tier = vip_map.get(m["id"]) or vip_map.get(m["email"])
-        current_tier = tier.get("tier", "一般") if tier else "一般"
-
-        with st.container():
-            c1, c2, c3, c4 = st.columns([3, 3, 1.5, 1.5])
-            c1.markdown(f"**{m['name']}**")
-            c2.markdown(f"{m['email']}")
-            c3.markdown(f"📅 {m['created']}")
-            with c4:
-                new_tier = st.selectbox(
-                    "等級",
-                    ["一般", "VIP", "VVIP"],
-                    index=["一般", "VIP", "VVIP"].index(current_tier) if current_tier in ("一般", "VIP", "VVIP") else 0,
-                    key=f"tier_{m['id']}",
-                    label_visibility="collapsed",
-                )
-                if new_tier != current_tier:
-                    if st.button("更新", key=f"btn_{m['id']}", type="primary"):
-                        try:
-                            if tier:
-                                sb_patch("member_tiers", tier["id"], {
-                                    "tier": new_tier,
-                                    "notion_user_id": m["id"],
-                                    "email": m["email"],
-                                })
-                            else:
-                                sb_post("member_tiers", {
-                                    "notion_user_id": m["id"],
-                                    "email": m["email"],
-                                    "tier": new_tier,
-                                })
-                            st.success(f"{m['name']} → {new_tier}")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"更新失敗：{e}")
-        st.markdown("---", unsafe_allow_html=True)
-
-
-# ═══════════════════════════════════════════════════════════
-#  頁面：訂單管理
-# ═══════════════════════════════════════════════════════════
-
-def page_orders():
-    st.markdown("## 訂單管理", unsafe_allow_html=True)
-
-    if not SUPABASE_URL:
-        st.error("SUPABASE_URL 尚未設定")
-        return
-
-    # ── 篩選 ──
-    fc1, fc2 = st.columns(2)
-    with fc1:
-        status_filter = st.selectbox(
-            "訂單狀態",
-            ["全部", "待付款", "已付款", "已取消"],
-            label_visibility="collapsed",
+    # ── 最近 7 天每日活躍 ──
+    st.markdown("### 最近 7 天每日活躍")
+    rows = local_db.query_all(
+        """
+        SELECT log_date, COUNT(DISTINCT user_id) AS active_users,
+               SUM(target_kcal) AS total_target
+          FROM daily_logs
+         WHERE log_date >= ?
+      GROUP BY log_date
+      ORDER BY log_date ASC
+        """,
+        (str(date.today() - timedelta(days=6)),),
+    )
+    if rows:
+        st.bar_chart(
+            {r["log_date"]: r["active_users"] for r in rows},
+            use_container_width=True,
+            height=240,
         )
-    with fc2:
-        st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
-        if st.button("匯出 CSV", type="secondary"):
-            _export_orders_csv(status_filter)
+    else:
+        st.info("最近 7 天還沒人寫紀錄")
 
-    with st.spinner("載入訂單..."):
-        try:
-            orders = sb_get("orders", order="created_at.desc", limit=500)
-        except Exception as e:
-            st.error(f"讀取失敗：{e}")
-            return
+    # ── 最近 10 筆飲食 / 運動 ──
+    cc1, cc2 = st.columns(2)
+    with cc1:
+        st.markdown("### 最近飲食紀錄")
+        meals = local_db.query_all(
+            """
+            SELECT m.name, m.calories, m.source, m.created_at,
+                   u.display_name AS who
+              FROM meal_records m
+              JOIN users u ON u.id = m.user_id
+          ORDER BY m.created_at DESC
+             LIMIT 10
+            """
+        )
+        if not meals:
+            st.caption("（沒有資料）")
+        for m in meals:
+            st.markdown(
+                f"- **{m['who'] or '?'}** · {m['name']} "
+                f"`{m['calories']} kcal` · {(m['created_at'] or '')[:16].replace('T',' ')}"
+            )
+    with cc2:
+        st.markdown("### 最近運動紀錄")
+        exes = local_db.query_all(
+            """
+            SELECT e.name, e.calories, e.duration_min, e.created_at,
+                   u.display_name AS who
+              FROM exercise_records e
+              JOIN users u ON u.id = e.user_id
+          ORDER BY e.created_at DESC
+             LIMIT 10
+            """
+        )
+        if not exes:
+            st.caption("（沒有資料）")
+        for e in exes:
+            st.markdown(
+                f"- **{e['who'] or '?'}** · {e['name']} "
+                f"{e['duration_min']}分 `{e['calories']} kcal` · "
+                f"{(e['created_at'] or '')[:16].replace('T',' ')}"
+            )
 
-    if status_filter != "全部":
-        mapping = {"待付款": "pending", "已付款": "completed", "已取消": "cancelled"}
-        target = mapping.get(status_filter, status_filter)
-        orders = [o for o in orders if o.get("status") == target]
 
-    st.caption(f"共 {len(orders)} 筆訂單")
+# ═══════════════════════════════════════════════════════════
+#  會員管理（list + drill-down + edit tier / xp）
+# ═══════════════════════════════════════════════════════════
 
-    if not orders:
-        st.info("目前沒有訂單")
+def page_members() -> None:
+    st.markdown("## 會員管理", unsafe_allow_html=True)
+    render_sync_banner()
+
+    q = st.text_input("🔍 搜尋（display_name / email / line_user_id）", key="member_search")
+    sql = """
+        SELECT id, display_name, email, line_user_id, tier, xp,
+               height_cm, weight_kg, created_at
+          FROM users
+    """
+    params: tuple = ()
+    if q:
+        like = f"%{q}%"
+        sql += " WHERE display_name LIKE ? OR email LIKE ? OR line_user_id LIKE ?"
+        params = (like, like, like)
+    sql += " ORDER BY created_at DESC LIMIT 200"
+
+    users = local_db.query_all(sql, params)
+    st.caption(f"顯示 {len(users)} 位會員（最多 200 筆）")
+
+    if not users:
+        st.info("沒有符合條件的會員")
         return
 
-    for o in orders:
-        oid = o.get("id", "")
-        email = o.get("user_email", o.get("email", "-"))
-        amount = float(o.get("amount") or 0)
-        status = o.get("status", "-")
-        created = (o.get("created_at") or "")[:16].replace("T", " ")
-
-        with st.container():
-            c1, c2, c3, c4 = st.columns([2, 3, 1.5, 2])
-            c1.markdown(f"`{oid[:8]}…`")
-            c2.markdown(f"{email}")
-            c3.markdown(f"**${amount:,.0f}**")
-            with c4:
-                new_status = st.selectbox(
-                    "狀態",
-                    ["pending", "completed", "cancelled"],
-                    index=["pending", "completed", "cancelled"].index(status) if status in ("pending", "completed", "cancelled") else 0,
-                    key=f"ost_{oid}",
-                    label_visibility="collapsed",
-                    format_func=lambda x: {"pending": "待付款", "completed": "已付款", "cancelled": "已取消"}.get(x, x),
+    # 表格 + 行動按鈕
+    for u in users:
+        with st.expander(
+            f"👤 {u['display_name'] or '—'}  ·  {u['tier']}  ·  XP {u['xp']}",
+            expanded=False,
+        ):
+            cc1, cc2 = st.columns([3, 2])
+            with cc1:
+                st.markdown(f"**ID**：`{u['id']}`")
+                st.markdown(f"**Email**：{u['email'] or '—'}")
+                st.markdown(f"**LINE UID**：{u['line_user_id'] or '—'}")
+                st.markdown(
+                    f"**身高 / 體重**：{u['height_cm'] or '—'} cm / "
+                    f"{u['weight_kg'] or '—'} kg"
                 )
-                if new_status != status:
-                    if st.button("更新", key=f"ob_{oid}", type="primary"):
+                st.markdown(f"**註冊時間**：{(u['created_at'] or '')[:16].replace('T',' ')}")
+
+            with cc2:
+                with st.form(f"edit_user_{u['id']}"):
+                    new_tier = st.selectbox(
+                        "tier",
+                        ["一般", "會員", "VIP"],
+                        index=["一般", "會員", "VIP"].index(u["tier"])
+                            if u["tier"] in ("一般", "會員", "VIP") else 0,
+                        key=f"tier_{u['id']}",
+                    )
+                    new_xp = st.number_input(
+                        "XP",
+                        min_value=0,
+                        max_value=999999,
+                        value=int(u["xp"] or 0),
+                        step=10,
+                        key=f"xp_{u['id']}",
+                    )
+                    save = st.form_submit_button("💾 儲存（雙寫雲端 + 本機）",
+                                                 type="primary", use_container_width=True)
+                if save:
+                    patch = {}
+                    if new_tier != u["tier"]:
+                        patch["tier"] = new_tier
+                    if int(new_xp) != int(u["xp"] or 0):
+                        patch["xp"] = int(new_xp)
+                    if not patch:
+                        st.info("沒有欄位變更")
+                    else:
                         try:
-                            sb_patch("orders", oid, {"status": new_status})
-                            st.success(f"訂單 {oid[:8]}… → {new_status}")
+                            sync_engine.write_through_update("users", u["id"], patch)
+                            st.success(f"✅ 已更新 {list(patch.keys())}")
                             st.rerun()
-                        except Exception as e:
-                            st.error(f"更新失敗：{e}")
-        st.markdown("---", unsafe_allow_html=True)
+                        except Exception as exc:  # noqa: BLE001
+                            st.error(f"更新失敗：{exc}")
+
+            # ── 該會員最近活動 ──
+            st.markdown("**最近 5 筆飲食**")
+            recent_m = local_db.query_all(
+                "SELECT name, calories, created_at FROM meal_records "
+                "WHERE user_id = ? ORDER BY created_at DESC LIMIT 5",
+                (u["id"],),
+            )
+            for m in recent_m:
+                st.markdown(
+                    f"- {m['name']} `{m['calories']} kcal` · "
+                    f"{(m['created_at'] or '')[:16].replace('T',' ')}"
+                )
+            if not recent_m:
+                st.caption("（沒紀錄）")
 
 
-def _export_orders_csv(status_filter):
-    try:
-        orders = sb_get("orders", order="created_at.desc", limit=500)
-    except Exception as e:
-        st.error(f"匯出失敗：{e}")
+# ═══════════════════════════════════════════════════════════
+#  折扣碼管理（list + 標記為已使用 / 撤銷）
+# ═══════════════════════════════════════════════════════════
+
+def page_discounts() -> None:
+    st.markdown("## 折扣碼管理", unsafe_allow_html=True)
+    render_sync_banner()
+
+    show_used = st.checkbox("顯示已使用 / 過期", value=False, key="dc_show_used")
+    sql = """
+        SELECT d.id, d.code, d.discount_type, d.value, d.chapter_id,
+               d.issued_at, d.expires_at, d.used_at,
+               u.display_name AS who, u.email
+          FROM user_discount_codes d
+          LEFT JOIN users u ON u.id = d.user_id
+    """
+    if not show_used:
+        sql += " WHERE d.used_at IS NULL"
+    sql += " ORDER BY d.issued_at DESC LIMIT 300"
+
+    codes = local_db.query_all(sql)
+    st.caption(f"共 {len(codes)} 筆")
+
+    if not codes:
+        st.info("沒有折扣碼")
         return
 
-    if status_filter != "全部":
-        mapping = {"待付款": "pending", "已付款": "completed", "已取消": "cancelled"}
-        target = mapping.get(status_filter, status_filter)
-        orders = [o for o in orders if o.get("status") == target]
-
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    all_keys = set()
-    for o in orders:
-        all_keys.update(o.keys())
-    all_keys = sorted(all_keys)
-    writer.writerow(all_keys)
-    for o in orders:
-        writer.writerow([o.get(k, "") for k in all_keys])
-
+    # CSV 匯出
+    csv_buf = io.StringIO()
+    writer = csv.DictWriter(csv_buf, fieldnames=list(codes[0].keys()))
+    writer.writeheader()
+    writer.writerows(codes)
     st.download_button(
-        label=f"下載 CSV ({len(orders)} 筆)",
-        data=buf.getvalue().encode("utf-8-sig"),
-        file_name=f"orders_{date.today()}.csv",
+        "📥 匯出 CSV",
+        data=csv_buf.getvalue(),
+        file_name=f"discount_codes_{date.today()}.csv",
         mime="text/csv",
-        type="primary",
+    )
+
+    for c in codes:
+        used_label = "✅ 已用" if c["used_at"] else "🟢 未用"
+        with st.expander(
+            f"{used_label}  {c['code']}  ·  {c['discount_type']} {c['value']}  ·  "
+            f"{c['who'] or '—'}",
+            expanded=False,
+        ):
+            st.markdown(f"**用戶**：{c['who'] or '—'} ({c['email'] or '—'})")
+            st.markdown(f"**章節**：{c['chapter_id']}")
+            st.markdown(f"**發放**：{(c['issued_at'] or '—')[:16].replace('T',' ')}")
+            st.markdown(f"**到期**：{(c['expires_at'] or '—')[:16].replace('T',' ')}")
+            st.markdown(f"**使用**：{(c['used_at'] or '未使用')[:16].replace('T',' ')}")
+
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                if not c["used_at"] and st.button(
+                    "標記為已使用", key=f"use_{c['id']}", type="secondary"
+                ):
+                    try:
+                        sync_engine.write_through_update(
+                            "user_discount_codes", c["id"],
+                            {"used_at": datetime.utcnow().isoformat() + "Z"},
+                        )
+                        st.success("已標記")
+                        st.rerun()
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"失敗：{exc}")
+            with cc2:
+                if c["used_at"] and st.button(
+                    "撤銷使用標記", key=f"unuse_{c['id']}", type="secondary"
+                ):
+                    try:
+                        sync_engine.write_through_update(
+                            "user_discount_codes", c["id"], {"used_at": None},
+                        )
+                        st.success("已撤銷")
+                        st.rerun()
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"失敗：{exc}")
+
+
+# ═══════════════════════════════════════════════════════════
+#  資料匯出（每張表 CSV）
+# ═══════════════════════════════════════════════════════════
+
+def page_export() -> None:
+    st.markdown("## 資料匯出", unsafe_allow_html=True)
+    render_sync_banner()
+
+    st.markdown(
+        "從本機 SQLite 匯出，給 Excel / Tableau / 報告用。匯出範圍 = "
+        "**最後一次成功同步前的資料**（非即時）。"
+    )
+
+    for table in local_db.SYNCED_TABLES:
+        rows = local_db.query_all(f"SELECT * FROM {table} ORDER BY created_at DESC LIMIT 50000")
+        if not rows:
+            st.caption(f"`{table}` — （空）")
+            continue
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+        st.download_button(
+            f"📥 {table} ({len(rows)} 筆)",
+            data=buf.getvalue(),
+            file_name=f"{table}_{date.today()}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+
+# ═══════════════════════════════════════════════════════════
+#  同步狀態 / 維運
+# ═══════════════════════════════════════════════════════════
+
+def page_sync() -> None:
+    st.markdown("## 同步狀態", unsafe_allow_html=True)
+    render_sync_banner()
+
+    summary = local_db.sync_status_summary()
+
+    st.markdown("### 各資料表 cursor / 上次同步")
+    if not summary["tables"]:
+        st.info("還沒同步過。請按上方「立刻同步」或執行 "
+                "`python scripts/sync_from_cloud.py --full`。")
+    else:
+        st.dataframe(summary["tables"], use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("### 高級操作")
+
+    colA, colB = st.columns(2)
+    with colA:
+        if st.button("🔄 全量重抓所有表（會比較慢）", type="secondary"):
+            with st.spinner("全量重抓…"):
+                conn = local_db.get_conn()
+                conn.execute("DELETE FROM _sync_meta")
+                try:
+                    result = sync_engine.pull_all()
+                    st.success(f"✅ 重抓完成，共 {result['total_rows']} 筆")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"失敗：{exc}")
+            st.rerun()
+    with colB:
+        if st.button("📂 開啟資料庫資料夾", type="secondary"):
+            try:
+                subprocess.Popen(["open", str(local_db.get_db_path().parent)])
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"開啟失敗：{exc}")
+
+    st.markdown("---")
+    st.markdown("### 排程")
+    st.code(
+        f"# 安裝排程（macOS launchd，每小時整點）\n"
+        f"bash {PROJECT_ROOT}/scripts/install_sync_schedule.sh\n\n"
+        f"# 看下次預定執行時間\n"
+        f"launchctl print gui/$(id -u)/com.sousville.sync | grep -E 'state|next'\n\n"
+        f"# 立刻踢一次\n"
+        f"launchctl kickstart -k gui/$(id -u)/com.sousville.sync\n\n"
+        f"# 解除\n"
+        f"bash {PROJECT_ROOT}/scripts/install_sync_schedule.sh --uninstall",
+        language="bash",
     )
 
 
 # ═══════════════════════════════════════════════════════════
-#  頁面：折扣碼管理
+#  題庫管理（純本地 quiz_bank.json，不上 Supabase）
 # ═══════════════════════════════════════════════════════════
 
-def page_discounts():
-    st.markdown("## 折扣碼管理", unsafe_allow_html=True)
-
-    if not SUPABASE_URL:
-        st.error("SUPABASE_URL 尚未設定")
-        return
-
-    # ── 新增表單 ──
-    with st.expander("新增折扣碼", expanded=False):
-        with st.form("discount_form"):
-            dc1, dc2 = st.columns(2)
-            with dc1:
-                code = st.text_input("折扣碼", placeholder="例：SOUSVILLE85")
-                discount_type = st.selectbox("類型", ["percentage", "fixed"])
-            with dc2:
-                value = st.number_input("折扣值", min_value=0, step=1, value=15)
-                max_uses = st.number_input("最大使用次數", min_value=0, value=100, step=1)
-            min_order = st.number_input("最低訂單金額", min_value=0, value=0, step=50)
-            expires = st.date_input("到期日")
-            is_active = st.checkbox("啟用", value=True)
-            submitted = st.form_submit_button("建立", type="primary")
-
-        if submitted:
-            if not code:
-                st.warning("請輸入折扣碼")
-            else:
-                try:
-                    sb_post("discount_codes", {
-                        "code": code.upper(),
-                        "discount_type": discount_type,
-                        "value": value,
-                        "max_uses": max_uses or None,
-                        "min_order": min_order or None,
-                        "expires_at": expires.isoformat() if expires else None,
-                        "is_active": is_active,
-                        "used_count": 0,
-                    })
-                    st.success(f"折扣碼 {code.upper()} 已建立")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"建立失敗：{e}")
-
-    st.markdown("---")
-
-    # ── 列表 ──
-    with st.spinner("載入折扣碼..."):
-        try:
-            codes = sb_get("discount_codes", order="created_at.desc")
-        except Exception as e:
-            st.error(f"讀取失敗：{e}")
-            return
-
-    if not codes:
-        st.info("尚無折扣碼")
-        return
-
-    for c in codes:
-        cid = c.get("id", "")
-        code_val = c.get("code", "")
-        dtype = c.get("discount_type", "")
-        val = c.get("value", 0)
-        used = c.get("used_count", 0) or 0
-        max_u = c.get("max_uses")
-        active = c.get("is_active", False)
-        expires = c.get("expires_at", "")
-
-        display_val = f"{val}%" if dtype == "percentage" else f"${val}"
-        status_text = "啟用" if active else "停用"
-        status_color = "var(--green)" if active else "var(--red)"
-        limit_text = f"{used}/{max_u}" if max_u else f"{used}/∞"
-        expires_text = expires[:10] if expires else "無期限"
-
-        with st.container():
-            mc1, mc2, mc3, mc4, mc5, mc6 = st.columns([2, 1.5, 1.5, 1.5, 1.5, 1])
-            mc1.markdown(f"**{code_val}**")
-            mc2.markdown(display_val)
-            mc3.markdown(limit_text)
-            mc4.markdown(f"📅 {expires_text}")
-            mc5.markdown(f"<span style='color:{status_color};'>{status_text}</span>", unsafe_allow_html=True)
-            with mc6:
-                if st.button("切換", key=f"dt_{cid}", type="secondary"):
-                    try:
-                        sb_patch("discount_codes", cid, {"is_active": not active})
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"更新失敗：{e}")
-                if st.button("刪除", key=f"dd_{cid}", type="secondary"):
-                    try:
-                        sb_delete("discount_codes", cid)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"刪除失敗：{e}")
-        st.markdown("---", unsafe_allow_html=True)
-
-
-# ═══════════════════════════════════════════════════════════
-#  頁面：題庫管理
-# ═══════════════════════════════════════════════════════════
-
-def load_quiz():
+def _load_quiz() -> dict:
     if QUIZ_FILE.exists():
         with open(QUIZ_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return []
+    return {"chapters": []}
 
-def save_quiz(data):
+
+def _save_quiz(data: dict) -> None:
     with open(QUIZ_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def page_quiz():
+
+def page_quiz() -> None:
     st.markdown("## 題庫管理", unsafe_allow_html=True)
+    st.caption("題庫存在 `quiz_bank.json`，後端啟動時讀檔；改完要 redeploy 才會生效。")
 
-    quiz = load_quiz()
-    st.caption(f"共 {len(quiz)} 題")
+    quiz = _load_quiz()
+    chapters = quiz.get("chapters", [])
+    total_levels = sum(len(ch.get("levels", [])) for ch in chapters)
+    total_q = sum(
+        len(lv.get("questions", []))
+        for ch in chapters for lv in ch.get("levels", [])
+    )
+    st.markdown(f"共 **{len(chapters)}** 章，**{total_levels}** 關，**{total_q}** 題")
 
-    # ── 新增 ──
-    with st.expander("新增題目", expanded=False):
-        with st.form("quiz_form"):
-            question = st.text_area("題目")
-            oc1, oc2 = st.columns(2)
-            with oc1:
-                opt0 = st.text_input("選項 A", key="qo0")
-                opt1 = st.text_input("選項 B", key="qo1")
-            with oc2:
-                opt2 = st.text_input("選項 C", key="qo2")
-                opt3 = st.text_input("選項 D", key="qo3")
-            answer = st.selectbox("正確答案", ["A", "B", "C", "D"], index=0)
-            explanation = st.text_area("解析")
-            submitted = st.form_submit_button("新增題目", type="primary")
-
-        if submitted:
-            if not question or not all([opt0, opt1, opt2, opt3]):
-                st.warning("請填寫完整")
-            else:
-                new_q = {
-                    "id": max((q.get("id", 0) for q in quiz), default=0) + 1,
-                    "question": question,
-                    "options": [opt0, opt1, opt2, opt3],
-                    "answer": ["A", "B", "C", "D"].index(answer),
-                    "explanation": explanation,
-                }
-                quiz.append(new_q)
-                save_quiz(quiz)
-                st.success("題目已新增")
-                st.rerun()
+    for ch in chapters:
+        with st.expander(f"{ch.get('icon','')} 第 {ch.get('id')} 章 — {ch.get('title')}"):
+            for lv in ch.get("levels", []):
+                badge = " 👑 BOSS" if lv.get("boss") else ""
+                st.markdown(
+                    f"**Level {lv.get('id')}** — {lv.get('title')}{badge} · "
+                    f"{len(lv.get('questions', []))} 題 · 獎勵 {lv.get('reward_xp')} XP"
+                )
 
     st.markdown("---")
-
-    # ── 題目列表 ──
-    for i, q in enumerate(quiz):
-        qid = q.get("id", i + 1)
-        opts = q.get("options", [])
-        ans_idx = q.get("answer", 0)
-        ans_label = ["A", "B", "C", "D"][ans_idx] if ans_idx < len(opts) else "?"
-        expl = q.get("explanation", "")
-
-        with st.container():
-            st.markdown(f"**Q{id}:** {q['question']}")
-            opt_text = "  |  ".join(
-                f"{'**' if j == ans_idx else ''}{['A','B','C','D'][j]}. {opts[j]}{'**' if j == ans_idx else ''}"
-                for j in range(min(len(opts), 4))
-            )
-            st.markdown(opt_text)
-            if expl:
-                st.caption(f"解析：{expl}")
-
-            bc1, bc2 = st.columns([1, 1])
-            with bc1:
-                if st.button("編輯", key=f"qe_{qid}", type="secondary"):
-                    st.session_state[f"edit_{qid}"] = True
-                    st.rerun()
-            with bc2:
-                if st.button("刪除", key=f"qd_{qid}", type="secondary"):
-                    quiz = [x for x in quiz if x.get("id") != qid]
-                    save_quiz(quiz)
-                    st.success("已刪除")
-                    st.rerun()
-
-            # ── 編輯模式 ──
-            if st.session_state.get(f"edit_{qid}"):
-                with st.form(f"edit_form_{qid}"):
-                    eq = st.text_area("題目", value=q["question"], key=f"ef_q_{qid}")
-                    ec1, ec2 = st.columns(2)
-                    with ec1:
-                        e0 = st.text_input("A", value=opts[0] if len(opts) > 0 else "", key=f"ef_0_{qid}")
-                        e1 = st.text_input("B", value=opts[1] if len(opts) > 1 else "", key=f"ef_1_{qid}")
-                    with ec2:
-                        e2 = st.text_input("C", value=opts[2] if len(opts) > 2 else "", key=f"ef_2_{qid}")
-                        e3 = st.text_input("D", value=opts[3] if len(opts) > 3 else "", key=f"ef_3_{qid}")
-                    ea = st.selectbox("正確答案", ["A", "B", "C", "D"], index=ans_idx, key=f"ef_a_{qid}")
-                    ee = st.text_area("解析", value=expl, key=f"ef_e_{qid}")
-                    save_btn = st.form_submit_button("儲存", type="primary")
-
-                if save_btn:
-                    for x in quiz:
-                        if x.get("id") == qid:
-                            x["question"] = eq
-                            x["options"] = [e0, e1, e2, e3]
-                            x["answer"] = ["A", "B", "C", "D"].index(ea)
-                            x["explanation"] = ee
-                            break
-                    save_quiz(quiz)
-                    st.session_state.pop(f"edit_{qid}", None)
-                    st.success("已更新")
-                    st.rerun()
-
-        st.markdown("---", unsafe_allow_html=True)
+    st.markdown("### 編輯 JSON（高級）")
+    raw = st.text_area("quiz_bank.json", value=json.dumps(quiz, ensure_ascii=False, indent=2),
+                       height=400, key="quiz_raw")
+    if st.button("💾 儲存", type="primary"):
+        try:
+            data = json.loads(raw)
+            _save_quiz(data)
+            st.success("✅ 已存檔。重新部署後端才會載入新題庫。")
+        except json.JSONDecodeError as e:
+            st.error(f"JSON 格式錯誤：{e}")
 
 
 # ═══════════════════════════════════════════════════════════
-#  Sidebar 導航
+#  Sidebar
 # ═══════════════════════════════════════════════════════════
 
-def render_sidebar():
+PAGES = [
+    ("dashboard", "📊 數據總覽",   page_dashboard),
+    ("members",   "👥 會員管理",   page_members),
+    ("discounts", "🎫 折扣碼",     page_discounts),
+    ("export",    "📥 資料匯出",   page_export),
+    ("sync",      "🔄 同步狀態",   page_sync),
+    ("quiz",      "📝 題庫",       page_quiz),
+]
+
+
+def render_sidebar() -> None:
     if LOGO_PATH.exists():
         st.image(str(LOGO_PATH), width=80)
-    st.markdown(f"**{st.session_state.admin_user}**", unsafe_allow_html=True)
-    st.caption("管理員")
+    st.caption(f"DB：`{local_db.get_db_path().name}`")
+    st.caption(f"路徑：{local_db.get_db_path().parent}")
 
     st.markdown("---")
-
-    pages = [
-        ("dashboard", "📊 數據總覽"),
-        ("members", "👥 會員管理"),
-        ("orders", "📦 訂單管理"),
-        ("discounts", "🎫 折扣碼管理"),
-        ("quiz", "📝 題庫管理"),
-    ]
-
-    for key, label in pages:
-        if st.button(label, use_container_width=True, type="secondary"):
+    for key, label, _ in PAGES:
+        if st.button(label, use_container_width=True, type="secondary",
+                     key=f"nav_{key}"):
             st.session_state.page = key
             st.rerun()
 
     st.markdown("---")
-    if st.button("登出", use_container_width=True, type="secondary"):
+    if st.button("登出", use_container_width=True, type="secondary", key="nav_logout"):
         st.session_state.admin_auth = False
-        st.session_state.admin_user = ""
         st.rerun()
 
 
@@ -811,8 +689,11 @@ def render_sidebar():
 #  主流程
 # ═══════════════════════════════════════════════════════════
 
-def main():
+def main() -> None:
     init_state()
+
+    # 確保 schema 在
+    local_db.get_conn()
 
     if not st.session_state.admin_auth:
         page_login()
@@ -822,18 +703,12 @@ def main():
         render_sidebar()
 
     page = st.session_state.page
-    if page == "dashboard":
+    page_func = next((f for k, _, f in PAGES if k == page), None)
+    if page_func is None:
+        st.session_state.page = "dashboard"
         page_dashboard()
-    elif page == "members":
-        page_members()
-    elif page == "orders":
-        page_orders()
-    elif page == "discounts":
-        page_discounts()
-    elif page == "quiz":
-        page_quiz()
     else:
-        page_dashboard()
+        page_func()
 
 
 if __name__ == "__main__":
