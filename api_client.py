@@ -536,3 +536,209 @@ def load_user_into_session() -> bool:
         st.session_state.profile_complete = True
 
     return True
+
+
+# ─── Logs / meals / exercises ───────────────────────────────────
+
+
+def get_today_log() -> dict[str, Any]:
+    """``/logs/today`` — 今日完整摘要：daily_log_id / 攝取 / 消耗 / meals / exercises。"""
+    return api.get("/api/v1/logs/today")
+
+
+def create_meal(
+    *,
+    meal_type: str,
+    name: str,
+    calories: int,
+    source: str = "custom",
+    bento_key: str | None = None,
+    portions: dict | None = None,
+    log_date: str | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "meal_type": meal_type,
+        "name": name,
+        "calories": int(calories),
+        "source": source,
+    }
+    if bento_key is not None:
+        body["bento_key"] = bento_key
+    if portions is not None:
+        body["portions"] = portions
+    if log_date is not None:
+        body["log_date"] = log_date
+    return api.post("/api/v1/meals", json=body)
+
+
+def delete_meal(meal_id: str) -> None:
+    api.delete(f"/api/v1/meals/{meal_id}")
+
+
+def create_exercise(
+    *,
+    name: str,
+    met: float,
+    duration_min: int,
+    intensity: str = "中強度",
+    log_date: str | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "name": name,
+        "met": float(met),
+        "duration_min": int(duration_min),
+        "intensity": intensity,
+    }
+    if log_date is not None:
+        body["log_date"] = log_date
+    return api.post("/api/v1/exercises", json=body)
+
+
+def delete_exercise(exercise_id: str) -> None:
+    api.delete(f"/api/v1/exercises/{exercise_id}")
+
+
+# ─── Profile / weight ───────────────────────────────────────────
+
+
+def update_profile(updates: dict[str, Any]) -> dict[str, Any]:
+    """``PATCH /users/me/profile`` — 局部更新 gender / height / weight / etc。"""
+    return api.patch("/api/v1/users/me/profile", json=updates)
+
+
+def record_weight(
+    weight_kg: float,
+    recorded_date: str | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    body: dict[str, Any] = {"weight_kg": float(weight_kg)}
+    if recorded_date:
+        body["recorded_date"] = recorded_date
+    if note:
+        body["note"] = note
+    return api.post("/api/v1/users/me/weight", json=body)
+
+
+def list_weight_history(limit: int = 30) -> list[dict[str, Any]]:
+    """回最近 ``limit`` 筆紀錄。"""
+    data = api.get("/api/v1/users/me/weight", params={"limit": limit})
+    if isinstance(data, dict):
+        return data.get("entries", []) or []
+    return data or []
+
+
+# ─── Game / Quiz ────────────────────────────────────────────────
+
+
+def get_game_state() -> dict[str, Any]:
+    """``/game/state`` — XP / level / hearts / streak / completed levels。"""
+    return api.get("/api/v1/game/state")
+
+
+def get_chapters() -> dict[str, Any]:
+    return api.get("/api/v1/game/chapters")
+
+
+def get_level(level_id: int) -> dict[str, Any]:
+    return api.get(f"/api/v1/game/levels/{level_id}")
+
+
+def submit_level(level_id: int, answers: list[int]) -> dict[str, Any]:
+    return api.post(
+        f"/api/v1/game/levels/{level_id}/submit",
+        json={"answers": [int(a) for a in answers]},
+    )
+
+
+def refill_hearts() -> dict[str, Any]:
+    return api.post("/api/v1/game/hearts/refill")
+
+
+def list_discount_codes() -> list[dict[str, Any]]:
+    data = api.get("/api/v1/users/me/discount-codes")
+    if isinstance(data, dict):
+        return data.get("codes", []) or []
+    return data or []
+
+
+# ─── Today log → session_state bridge ───────────────────────────
+
+
+def refresh_today_log_into_session() -> bool:
+    """把 ``/logs/today`` 的內容寫進 session_state 的 today_* 欄位，
+    讓既有 UI（讀 ``st.session_state.today_meals`` 等）不用改。
+
+    回 True 表示拉成功；False 表示 API 失敗（網路 / cold start）。
+    """
+    try:
+        log = get_today_log()
+    except (Unauthenticated, APIError):
+        return False
+
+    st.session_state.today_log_id = log.get("daily_log_id")
+    st.session_state.today_cal_in = int(log.get("calories_in", 0) or 0)
+    st.session_state.today_cal_out = int(log.get("calories_burned", 0) or 0)
+
+    # meals: 顯示用字串 + 原始 records（給 delete 用）
+    meals = log.get("meals", []) or []
+    st.session_state.today_meals = [
+        f"{m.get('name', '')} ({int(m.get('calories', 0) or 0)} kcal)"
+        for m in meals
+    ]
+    st.session_state.today_meal_records = meals
+
+    # exercises 同理
+    exercises = log.get("exercises", []) or []
+    st.session_state.today_exercises = [
+        f"{e.get('name', '')} MET {e.get('met')} "
+        f"{int(e.get('duration_min', 0) or 0)}分 "
+        f"({int(e.get('calories', 0) or 0)} kcal)"
+        for e in exercises
+    ]
+    st.session_state.today_exercise_records = exercises
+
+    # 寫回 user_data 的 BMR/TDEE/target/bmi（這些是衍生值，每天都重算）
+    ud = st.session_state.setdefault("user_data", {})
+    if log.get("bmr") is not None:
+        ud["bmr"] = log["bmr"]
+    if log.get("tdee") is not None:
+        ud["tdee"] = log["tdee"]
+    if log.get("target_kcal") is not None:
+        ud["target"] = log["target_kcal"]
+
+    # 累計份量需要從 meals 推回（用 meal_records 裡的 portions JSONB）
+    portions: dict[str, float] = {"蛋白質": 0.0, "全穀根莖": 0.0, "蔬菜": 0.0, "油脂": 0.0, "奶類": 0.0}
+    for m in meals:
+        meal_portions = m.get("portions") or {}
+        if isinstance(meal_portions, dict):
+            for k, v in meal_portions.items():
+                if k in portions:
+                    try:
+                        portions[k] += float(v or 0)
+                    except (TypeError, ValueError):
+                        pass
+    st.session_state.portions = portions
+
+    return True
+
+
+def refresh_game_state_into_session() -> bool:
+    """把 ``/game/state`` 拉回來寫進 session_state（hearts、xp、completed）。"""
+    try:
+        state = get_game_state()
+    except (Unauthenticated, APIError):
+        return False
+
+    st.session_state.game_hearts = int(state.get("hearts", 5) or 5)
+    st.session_state.total_xp = int(state.get("xp", 0) or 0)
+    st.session_state.game_progress = {
+        "completed": state.get("completed_levels", []) or [],
+        "total_game_xp": int(state.get("total_game_xp", 0) or 0),
+    }
+    # 後端有自動 catch-up regen，UI 顯示倒數時間用：
+    st.session_state.hearts_seconds_to_next_regen = int(
+        state.get("hearts_seconds_to_next_regen", 0) or 0
+    )
+    return True
+
+    return True
