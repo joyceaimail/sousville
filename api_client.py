@@ -741,4 +741,38 @@ def refresh_game_state_into_session() -> bool:
     )
     return True
 
+# ─── Theme Sprint helpers ───────────────────────────────────────
+
+
+def get_active_theme() -> dict[str, Any]:
+    """``GET /themes/active`` — 當前期狀態 + friendly encouragement message。
+
+    沒 active run 時回 ``{"has_active": False, "next_theme": ..., "encouragement": ...}``。
+    有 active run 時回完整進度（run_id, theme, days, days_achieved, ...）。
+    """
+    return api.get("/api/v1/themes/active")
+
+
+def start_next_theme() -> dict[str, Any]:
+    """``POST /themes/start-next`` — 使用者按按鈕開下一期。"""
+    return api.post("/api/v1/themes/start-next")
+
+
+def list_badges() -> list[dict[str, Any]]:
+    data = api.get("/api/v1/themes/badges")
+    if isinstance(data, dict):
+        return data.get("badges", []) or []
+    return data or []
+
+
+def refresh_active_theme_into_session() -> bool:
+    """把 active theme 寫進 session_state.active_theme，給首頁 widget 讀。
+
+    回 ``True`` 表示拉到資料（不論有沒有 active run）；``False`` = API 失敗。
+    """
+    try:
+        data = get_active_theme()
+    except (Unauthenticated, APIError):
+        return False
+    st.session_state["active_theme"] = data or {}
     return True

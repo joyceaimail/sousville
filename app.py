@@ -1476,6 +1476,13 @@ def page_profile():
         else:
             st.info("調整體重後會自動記錄，累積資料後會顯示趨勢圖。")
 
+    # ── 徽章牆 ──
+    if st.session_state.profile_complete:
+        st.markdown("---")
+        st.markdown("### 🏅 我的徽章")
+        render_badge_wall()
+
+
 def _get_next_level(chapters_data, completed):
     """Walk API ``chapters_data`` and return the first level not yet completed."""
     for ch in chapters_data:
@@ -2210,6 +2217,196 @@ def page_exercise_manager():
 # ═══════════════════════════════════════════════════════════
 #  主流程
 # ═══════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════
+#  Theme Sprint widget（5 天主題挑戰，友善鼓勵語氣）
+# ═══════════════════════════════════════════════════════════
+
+def _theme_progress_bar(filled: int, total: int) -> str:
+    filled = max(0, min(filled, total))
+    return "●" * filled + "○" * (total - filled)
+
+
+def render_theme_widget():
+    """首頁頂部的「本期主題」進度卡。
+
+    友善設計：
+    - 沒 active run → 顯示「下一期推薦 + 開始按鈕」
+    - 有 active run + 走順 → 「繼續加油 X/N」
+    - 有 active run + 已斷 streak → 「沒關係，碎片繼續累積」
+    - 已 5/5 滿分 → 「太厲害了！等待結算」
+    """
+    data = st.session_state.get("active_theme") or {}
+
+    if not data:
+        # 第一次顯示（剛載入），先拉一次
+        if api_client.refresh_active_theme_into_session():
+            data = st.session_state.get("active_theme") or {}
+
+    # 沒 active run
+    if not data.get("run_id") and not data.get("has_active", True):
+        next_theme = data.get("next_theme")
+        encouragement = data.get("encouragement", "")
+        if not next_theme:
+            st.markdown(f"""
+            <div class="card" style="text-align:center; padding:20px; margin-bottom:14px;">
+              <div style="font-size:1.2rem; margin-bottom:6px;">🏆</div>
+              <div style="color:var(--text-dim);">{encouragement}</div>
+            </div>""", unsafe_allow_html=True)
+            return
+
+        icon = next_theme.get("icon", "🎯")
+        title = next_theme.get("title", "")
+        desc = next_theme.get("description", "")
+        st.markdown(f"""
+        <div class="card" style="padding:18px; margin-bottom:14px;
+                                 background:linear-gradient(135deg, rgba(27,157,158,0.08), rgba(255,179,0,0.06));">
+          <div style="display:flex; align-items:center; gap:12px; margin-bottom:8px;">
+            <div style="font-size:2.2rem;">{icon}</div>
+            <div>
+              <div style="font-weight:900; font-size:1.1rem; color:var(--text);">下一期主題：{title}</div>
+              <div style="color:var(--text-dim); font-size:.85rem; margin-top:2px;">{desc}</div>
+            </div>
+          </div>
+          <div style="color:var(--text-dim); font-size:.88rem; margin:8px 0;">{encouragement}</div>
+        </div>""", unsafe_allow_html=True)
+        if st.button(f"🚀 開始挑戰 {title}", key="start_next_theme",
+                     type="primary", use_container_width=True):
+            try:
+                api_client.start_next_theme()
+                api_client.refresh_active_theme_into_session()
+                st.success("開始囉！第一片徽章在等你 ✨")
+                st.rerun()
+            except APIError as exc:
+                st.warning(f"開新主題遇到問題：{exc.detail}")
+        return
+
+    # 有 active run
+    theme = data.get("theme") or {}
+    icon = theme.get("icon", "🎯")
+    title = theme.get("title", "")
+    duration = int(data.get("duration_days", 5))
+    days = data.get("days") or []
+    days_achieved = int(data.get("days_achieved", 0) or 0)
+    streak_broken = bool(data.get("streak_broken", False))
+    encouragement = data.get("encouragement", "")
+    today_idx = len(days)
+
+    progress_dots = _theme_progress_bar(today_idx, duration)
+
+    # 計算今天進度（最新一筆）
+    today_row = days[-1] if days else None
+    today_metric_html = ""
+    if today_row:
+        mv = today_row.get("metric_value")
+        mt = today_row.get("metric_target")
+        if mv is not None and mt:
+            pct = min(float(mv) / float(mt), 1.0) * 100 if mt else 0
+            color = "var(--green)" if today_row.get("achieved") else "var(--gold)"
+            today_metric_html = f"""
+            <div style="margin-top:10px;">
+              <div style="display:flex; justify-content:space-between; font-size:.82rem; color:var(--text-dim); margin-bottom:4px;">
+                <span>今天進度</span>
+                <span><strong style="color:{color};">{mv:.1f}</strong> / {mt:.1f}</span>
+              </div>
+              <div style="height:8px; background:rgba(27,157,158,0.1); border-radius:4px; overflow:hidden;">
+                <div style="width:{pct}%; height:100%; background:linear-gradient(90deg, var(--blue), var(--blue-light)); transition:width .4s;"></div>
+              </div>
+            </div>"""
+
+    # 達標天數的「碎片」視覺化
+    pieces_html = ""
+    for i in range(duration):
+        achieved = i < len(days) and days[i].get("achieved")
+        if achieved:
+            pieces_html += '<span style="font-size:1.4rem;">🧩</span>'
+        elif i < today_idx:
+            pieces_html += '<span style="font-size:1.4rem; opacity:0.3;">⬜</span>'
+        else:
+            pieces_html += '<span style="font-size:1.4rem; opacity:0.4;">⬜</span>'
+
+    bg_gradient = (
+        "linear-gradient(135deg, rgba(67,160,71,0.10), rgba(27,157,158,0.08))"
+        if not streak_broken
+        else "linear-gradient(135deg, rgba(255,179,0,0.10), rgba(255,87,34,0.06))"
+    )
+
+    st.markdown(f"""
+    <div class="card" style="padding:18px; margin-bottom:14px; background:{bg_gradient};">
+      <div style="display:flex; align-items:center; gap:12px;">
+        <div style="font-size:2rem;">{icon}</div>
+        <div style="flex:1;">
+          <div style="font-weight:900; font-size:1.05rem; color:var(--text);">本期主題：{title}</div>
+          <div style="color:var(--text-dim); font-size:.82rem; margin-top:2px;">
+            Day {today_idx}/{duration} &nbsp;{progress_dots}
+          </div>
+        </div>
+        <div style="text-align:right;">
+          <div style="font-size:.75rem; color:var(--text-dim);">徽章碎片</div>
+          <div style="font-weight:900; color:var(--blue); font-size:1.1rem;">{days_achieved} / {duration}</div>
+        </div>
+      </div>
+
+      <div style="margin-top:12px; text-align:center; letter-spacing:6px;">
+        {pieces_html}
+      </div>
+
+      {today_metric_html}
+
+      <div style="margin-top:12px; padding:10px 12px; background:rgba(255,255,255,0.6);
+                  border-radius:10px; font-size:.88rem; color:var(--text); text-align:center;">
+        {encouragement}
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════
+#  徽章牆（Profile 頁底部）
+# ═══════════════════════════════════════════════════════════
+
+def render_badge_wall():
+    """Profile 頁底部顯示已收集的主題徽章。"""
+    try:
+        badges = api_client.list_badges()
+    except APIError:
+        badges = []
+
+    if not badges:
+        st.markdown(
+            "<div style='color:var(--text-dim); text-align:center; padding:20px;'>"
+            "🌱 還沒有徽章，完成主題挑戰就會收集到這裡！"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    cols = st.columns(min(len(badges), 4) or 1)
+    THEME_LABELS = {
+        "fiber":    ("🥦", "纖維大師"),
+        "protein":  ("💪", "蛋白質達人"),
+        "exercise": ("🏃", "運動行家"),
+        "deficit":  ("🔥", "赤字王者"),
+    }
+    for i, b in enumerate(badges):
+        icon, label = THEME_LABELS.get(b.get("theme_key", ""), ("🏅", b.get("theme_key", "")))
+        pieces = int(b.get("pieces_earned", 0) or 0)
+        completed = b.get("completed")
+        opacity = "1" if completed else f"{0.3 + 0.14 * pieces}"
+        ribbon = ""
+        if completed:
+            ribbon = '<div style="position:absolute; top:6px; right:6px; font-size:.7rem; color:var(--green);">✨ 完整</div>'
+        with cols[i % len(cols)]:
+            st.markdown(f"""
+            <div class="card" style="text-align:center; padding:16px 8px; position:relative; opacity:{opacity};">
+              {ribbon}
+              <div style="font-size:2.4rem;">{icon}</div>
+              <div style="font-weight:700; margin-top:4px;">{label}</div>
+              <div style="font-size:.78rem; color:var(--text-dim); margin-top:2px;">
+                {pieces}/5 碎片
+              </div>
+            </div>""", unsafe_allow_html=True)
+
 
 def main():
     init_session_state()
