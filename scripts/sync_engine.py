@@ -20,6 +20,8 @@ import os
 import time
 from typing import Any
 
+from urllib.parse import quote as urlquote
+
 import requests
 
 from scripts import local_db
@@ -106,7 +108,9 @@ def pull_table(table: str) -> tuple[int, str | None]:
 
     qs_parts = [f"select=*", f"order={cursor_col}.asc"]
     if last_cursor:
-        qs_parts.append(f"{cursor_col}=gte.{last_cursor}")
+        # URL-encode 整個 cursor value（含 ``+00:00`` 時區偏移），
+        # 不然 ``+`` 在 query string 會被當成 space，PostgREST 拒收 → 400
+        qs_parts.append(f"{cursor_col}=gte.{urlquote(last_cursor, safe='')}")
 
     base_url = f"{url_base}/rest/v1/{table}?" + "&".join(qs_parts)
 
