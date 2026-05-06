@@ -664,6 +664,73 @@ footer:after {
 }
 
 /* ── 手機 RWD ── */
+/* ── Game-first 首頁（status 條 / hero / section nav）── */
+.top-status-bar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; background: var(--warm-card);
+  border-radius: 18px; box-shadow: var(--shadow);
+  margin-bottom: 12px; border: 1px solid var(--border);
+}
+.status-level-pill {
+  background: linear-gradient(135deg, var(--red-deep), var(--gold));
+  color: #fff; font-weight: 900; font-size: 1rem;
+  padding: 8px 16px; border-radius: 20px;
+  font-family: 'Quicksand', sans-serif;
+  box-shadow: 0 3px 8px var(--gold-glow);
+  white-space: nowrap;
+}
+.status-name { font-weight: 800; color: var(--text); font-size: .95rem; }
+.status-xp-section { flex: 1; min-width: 100px; }
+.status-xp-track {
+  height: 14px; background: rgba(255,138,101,0.15);
+  border-radius: 8px; overflow: hidden;
+}
+.status-xp-fill {
+  height: 100%; background: linear-gradient(90deg, var(--gold), var(--red-deep));
+  transition: width .5s ease; box-shadow: 0 0 10px var(--gold-glow);
+}
+.status-xp-text { font-size: .78rem; color: var(--text-dim); margin-top: 3px; text-align: right; }
+.status-hearts { font-size: 1.3rem; letter-spacing: 1px; white-space: nowrap; }
+
+/* Hero next-level 卡（大 CTA） */
+.hero-next-level {
+  display: flex; align-items: center; gap: 16px;
+  background: linear-gradient(135deg, rgba(255,179,0,0.14), rgba(255,138,101,0.10));
+  border: 2px solid var(--gold); border-radius: 22px;
+  padding: 20px 22px; margin-bottom: 14px;
+  box-shadow: 0 6px 20px var(--gold-glow);
+}
+.hero-icon {
+  font-size: 3rem; flex-shrink: 0;
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+.hero-text { flex: 1; min-width: 0; }
+.hero-label { font-size: .78rem; color: var(--text-dim); font-weight: 700;
+              text-transform: uppercase; letter-spacing: 1.5px; }
+.hero-title { font-size: 1.15rem; font-weight: 900; color: var(--text);
+              margin-top: 4px; line-height: 1.3; word-wrap: break-word; }
+.hero-xp-badge {
+  background: var(--gold); color: var(--text); font-weight: 900;
+  padding: 6px 12px; border-radius: 14px; font-size: .9rem;
+  white-space: nowrap; box-shadow: 0 2px 6px var(--gold-glow);
+}
+
+/* Section nav 4 顆按鈕（取代 tabs） */
+.section-nav { display: flex; gap: 8px; margin-bottom: 14px; }
+div[data-testid="stHorizontalBlock"] .stButton button.section-nav-btn-active {
+  background: linear-gradient(135deg, var(--red-deep), var(--red)) !important;
+  color: #fff !important;
+  border: 2px solid var(--gold) !important;
+  box-shadow: 0 4px 14px var(--red-glow) !important;
+}
+
+/* All-quest summary 圓圖 (mini gauge for top bar) */
+.mini-gauge {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 12px; background: var(--warm-card-alt);
+  border-radius: 14px; font-size: .82rem; color: var(--text-dim);
+}
+
 /* ── 手機 RWD（Duolingo-style 大 tap 區）── */
 @media only screen and (max-width: 768px) {
   .stButton > button {
@@ -2489,6 +2556,119 @@ def render_badge_wall():
             </div>""", unsafe_allow_html=True)
 
 
+def render_top_status_bar():
+    """頂部精簡狀態條：Lv pill + 名字 + XP bar + Hearts。
+
+    取代舊版 sidebar 把所有狀態擠在左邊的設計。手機桌面通用。
+    """
+    ud = st.session_state.user_data or {}
+    name = ud.get("name") or "玩家"
+    xp = int(st.session_state.get("total_xp", 0) or 0)
+    lv = get_level(xp)
+    cur_xp, next_xp = get_next_level_xp(xp)
+    pct = min((xp - cur_xp) / max(1, next_xp - cur_xp), 1.0) * 100
+    hearts = int(st.session_state.get("game_hearts", 5) or 5)
+    hearts = max(0, min(5, hearts))
+    hearts_html = "❤️" * hearts + "🖤" * (5 - hearts)
+
+    st.markdown(f"""
+    <div class="top-status-bar">
+      <div class="status-level-pill">Lv.{lv}</div>
+      <span class="status-name">{name}</span>
+      <div class="status-xp-section">
+        <div class="status-xp-track">
+          <div class="status-xp-fill" style="width:{pct:.1f}%"></div>
+        </div>
+        <div class="status-xp-text">{xp} / {next_xp} XP</div>
+      </div>
+      <div class="status-hearts">{hearts_html}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_section_nav() -> str:
+    """4 顆 section button 取代 st.tabs。
+
+    回當前 section key（'challenge' / 'diet' / 'exercise' / 'stats'）。
+    預設 challenge — 讓「遊戲」是首頁主角。
+    """
+    section = st.session_state.get("home_section", "challenge")
+    options = [
+        ("challenge", "🎯 挑戰"),
+        ("diet",      "🍽️ 飲食"),
+        ("exercise",  "🏃 運動"),
+        ("stats",     "📊 數據"),
+    ]
+    cols = st.columns(len(options))
+    for i, (key, label) in enumerate(options):
+        is_active = (section == key)
+        with cols[i]:
+            btn = st.button(
+                label,
+                key=f"section_nav_{key}",
+                type="primary" if is_active else "secondary",
+                use_container_width=True,
+            )
+            if btn and not is_active:
+                st.session_state.home_section = key
+                st.rerun()
+    return section
+
+
+def render_challenge_section():
+    """Challenge section 的內容 — hero 「下一關」CTA + 遊戲地圖 + Quiz。
+
+    把舊版 ``tab_daily_challenge`` 升級為「首頁主角」：上方加 hero next-level 卡
+    讓使用者一眼看到「下一個任務 + 開始按鈕」。
+    """
+    # 重用既有 tab_daily_challenge 的 quiz / map 邏輯
+    tab_daily_challenge()
+
+
+def render_sidebar_slim():
+    """簡化版 sidebar — 主要狀態移到 top status bar，這裡只放設定 / 登出。"""
+    st.markdown("""
+    <div style="text-align:center; margin: 4px 0 12px;">
+      <span style="font-size:1.5rem; font-weight:900;
+                   background:linear-gradient(135deg,#FF8A65,#FFB300);
+                   -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+                   font-family:'Noto Sans TC',sans-serif;
+                   letter-spacing: 1px;">
+        🔥 舒肥底家
+      </span>
+    </div>""", unsafe_allow_html=True)
+
+    if st.session_state.profile_complete:
+        mood = get_dolphin_mood()
+        st.markdown(_svg_dolphin(mood, size=72), unsafe_allow_html=True)
+        msg = get_dolphin_message(mood)
+        st.markdown(f'<div class="mascot-speech" style="text-align:center; '
+                    f'font-size:.85rem; color:var(--text-dim); padding:8px 6px; '
+                    f'line-height:1.5;">{msg}</div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    if st.button("⚙️ 個人設定", use_container_width=True, type="secondary",
+                 key="sidebar_profile"):
+        st.session_state["show_profile"] = True
+        st.rerun()
+    if st.button("📝 運動項目新增", use_container_width=True, type="secondary",
+                 key="sidebar_exmgr"):
+        st.session_state["show_exercise_mgr"] = True
+        st.rerun()
+
+    st.markdown("---")
+    if st.button("登出", use_container_width=True, type="secondary",
+                 key="sidebar_logout"):
+        try:
+            api_client.clear_tokens()
+        except Exception:
+            pass
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        st.rerun()
+
+
 def main():
     init_session_state()
 
@@ -2499,12 +2679,21 @@ def main():
     check_ip_change()
     check_daily_reset()
 
-    # 每次 rerun 都把今日 log + 遊戲狀態同步進 session_state
+    # 每次 rerun 都把今日 log + 遊戲狀態 + 主題同步進 session_state
     if not st.session_state.get("today_log_id"):
         api_client.refresh_today_log_into_session()
+    try:
+        api_client.refresh_active_theme_into_session()
+    except Exception:
+        pass
+    try:
+        api_client.refresh_game_state_into_session()
+    except Exception:
+        pass
 
+    # 簡化 sidebar — 主要狀態移到 top bar
     with st.sidebar:
-        render_sidebar()
+        render_sidebar_slim()
 
     # 子頁面：個人設定 / 運動項目管理
     if st.session_state.get("show_profile"):
@@ -2527,22 +2716,21 @@ def main():
         page_profile()
         return
 
-    render_top_dashboard()
+    # ── Game-first 首頁 ──
+    render_top_status_bar()         # 頂部 Lv/XP/Hearts 條
+    render_theme_widget()           # 5 天主題 widget（修：之前根本沒被 call）
+    section = render_section_nav()  # 4 顆 section button
 
-    tabs = st.tabs([
-        "🍽️ 飲食紀錄",
-        "🏃 運動紀錄",
-        "📉 熱量赤字",
-        "🎯 今日挑戰",
-    ])
-    with tabs[0]:
+    if section == "challenge":
+        render_challenge_section()
+    elif section == "diet":
         tab_diet_record()
-    with tabs[1]:
+    elif section == "exercise":
         tab_exercise_record()
-    with tabs[2]:
-        tab_calorie_deficit()
-    with tabs[3]:
-        tab_daily_challenge()
+    elif section == "stats":
+        render_top_dashboard()      # 儀表板（gauges + dolphin advisor）
+        st.markdown("---")
+        tab_calorie_deficit()       # 熱量赤字總覽
 
 
 if __name__ == "__main__":
