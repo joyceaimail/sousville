@@ -396,22 +396,22 @@ st.markdown("""
 <style>
 
 :root { lang: "zh-TW";
-  /* ─── Warm Red + Gold（Duolingo 風 / 喜慶熱情）── */
-  --red:          #E63946;          /* 主紅 */
-  --red-deep:     #C5283D;
-  --red-light:    #FF6B6B;
-  --red-glow:     rgba(230,57,70,0.22);
-  --orange:       #FF6B35;          /* 暖橘 */
+  /* ─── 暖珊瑚 + 金（柔暖系，不壓迫）── */
+  --red:          #FF8A65;          /* 主色：珊瑚桃，暖但不壓迫 */
+  --red-deep:     #F4511E;          /* 強調：烤橙紅 */
+  --red-light:    #FFCDB2;          /* 淺色：淡桃 */
+  --red-glow:     rgba(255,138,101,0.25);
+  --orange:       #FFB088;          /* 暖橘（柔） */
   --gold:         #FFB300;          /* 金 */
   --gold-deep:    #FF8F00;
-  --gold-glow:    rgba(255,179,0,0.28);
+  --gold-glow:    rgba(255,179,0,0.30);
   --success:      #43A047;          /* 對的、達標保留綠 */
   --success-glow: rgba(67,160,71,0.18);
 
-  --cream:        #FFF8F0;          /* 米白底 */
+  --cream:        #FFFAF5;          /* 米白底（更亮） */
   --warm-card:    #FFFFFF;
   --warm-card-alt:#FFFAF3;
-  --warm-sidebar: linear-gradient(180deg, #FFE5D2 0%, #FFFFFF 50%);
+  --warm-sidebar: linear-gradient(180deg, #FFEFE3 0%, #FFFFFF 50%);
 
   --text:         #2D1B0E;          /* 暖黑 */
   --text-dim:     #8B5A3C;          /* 暖棕 */
@@ -1102,7 +1102,7 @@ def render_sidebar():
     st.markdown("""
     <div style="text-align:center; margin: 4px 0 12px;">
       <span style="font-size:1.5rem; font-weight:900;
-                   background:linear-gradient(135deg,#E63946,#FF6B35);
+                   background:linear-gradient(135deg,#FF8A65,#FFB300);
                    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
                    font-family:'Noto Sans TC',sans-serif;
                    letter-spacing: 1px;">
@@ -2338,7 +2338,7 @@ def render_theme_widget():
         desc = next_theme.get("description", "")
         st.markdown(f"""
         <div class="card" style="padding:20px; margin-bottom:14px;
-                                 background:linear-gradient(135deg, rgba(230,57,70,0.08), rgba(255,179,0,0.10));
+                                 background:linear-gradient(135deg, rgba(255,138,101,0.10), rgba(255,179,0,0.14));
                                  border:2px solid var(--gold);">
           <div style="display:flex; align-items:center; gap:14px; margin-bottom:10px;">
             <div style="font-size:2.6rem;">{icon}</div>
