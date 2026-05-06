@@ -1232,14 +1232,13 @@ def _render_email_login_flow():
         target_email = st.session_state.get("email_login_email", "")
         st.success(
             f"✉️ 驗證碼已寄到 **{target_email}**，10 分鐘內有效。"
-            f"\n\n如沒設 SMTP（dev mode），驗證碼會印在 Render Logs。"
         )
         with st.form("email_verify_form"):
             code = st.text_input(
                 "6 位驗證碼",
                 max_chars=6,
                 placeholder="123456",
-                help="從信箱（或 Render Logs）複製過來",
+                help="從信箱複製過來",
             )
             c1, c2 = st.columns(2)
             with c1:
@@ -1251,10 +1250,27 @@ def _render_email_login_flow():
                     "← 換 email", use_container_width=True
                 )
 
+        # 表單外加「重寄」按鈕（form_submit_button 一個 form 一次只能觸發一個，
+        # 把 resend 拉出來才不會跟 verify / back 互相搶）
+        resend_clicked = st.button(
+            "🔄 沒收到？重寄一次驗證碼",
+            key="resend_email_code",
+            use_container_width=True,
+            type="secondary",
+        )
+
         if back_clicked:
             st.session_state.email_login_step = "request"
             st.session_state.pop("email_login_email", None)
             st.rerun()
+
+        if resend_clicked:
+            try:
+                api_client.request_email_code(target_email)
+                st.success("✅ 已重新寄出，請查看 Gmail（或垃圾信匣）")
+            except APIError as exc:
+                # 60 秒內重複申請會被 rate limit 擋下；訊息直接給使用者看
+                st.warning(f"重寄太頻繁：{exc.detail}")
 
         if verify_clicked:
             if not code or not code.strip():
