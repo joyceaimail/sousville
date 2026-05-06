@@ -396,28 +396,45 @@ st.markdown("""
 <style>
 
 :root { lang: "zh-TW";
-  --blue:         #1B9D9E;
-  --blue-dim:     #158586;
-  --blue-deep:    #0E6E6F;
-  --blue-light:   #7ED4D4;
-  --blue-glow:    rgba(27,157,158,0.22);
-  --green:        #1B9D9E;
-  --green-dim:    #158586;
-  --green-glow:   rgba(27,157,158,0.18);
-  --gold:         #FFB300;
-  --gold-dim:     #FF8F00;
-  --red:          #EF5350;
-  --coral:        #FF7043;
-  --bg:           #F0F7F8;
+  /* ─── Warm Red + Gold（Duolingo 風 / 喜慶熱情）── */
+  --red:          #E63946;          /* 主紅 */
+  --red-deep:     #C5283D;
+  --red-light:    #FF6B6B;
+  --red-glow:     rgba(230,57,70,0.22);
+  --orange:       #FF6B35;          /* 暖橘 */
+  --gold:         #FFB300;          /* 金 */
+  --gold-deep:    #FF8F00;
+  --gold-glow:    rgba(255,179,0,0.28);
+  --success:      #43A047;          /* 對的、達標保留綠 */
+  --success-glow: rgba(67,160,71,0.18);
+
+  --cream:        #FFF8F0;          /* 米白底 */
+  --warm-card:    #FFFFFF;
+  --warm-card-alt:#FFFAF3;
+  --warm-sidebar: linear-gradient(180deg, #FFE5D2 0%, #FFFFFF 50%);
+
+  --text:         #2D1B0E;          /* 暖黑 */
+  --text-dim:     #8B5A3C;          /* 暖棕 */
+  --border:       rgba(230,57,70,0.12);
+  --shadow:       0 4px 20px rgba(230,57,70,0.08);
+  --shadow-hover: 0 6px 28px rgba(230,57,70,0.18);
+
+  /* ─── 舊變數 alias（不改舊 class，自動繼承新色）── */
+  --blue:         var(--red);
+  --blue-dim:     var(--red-deep);
+  --blue-deep:    var(--red-deep);
+  --blue-light:   var(--red-light);
+  --blue-glow:    var(--red-glow);
+  --green:        var(--success);
+  --green-dim:    var(--success);
+  --green-glow:   var(--success-glow);
+  --gold-dim:     var(--gold-deep);
+  --coral:        var(--orange);
+  --bg:           var(--cream);
   --bg-white:     #FFFFFF;
-  --bg-card:      #FFFFFF;
-  --bg-card-alt:  #F5FAFB;
-  --bg-sidebar:   linear-gradient(180deg, #E8F4F4 0%, #FFFFFF 40%);
-  --text:         #1A3C40;
-  --text-dim:     #6B9DA0;
-  --border:       rgba(27,157,158,0.12);
-  --shadow:       0 4px 20px rgba(27,157,158,0.08);
-  --shadow-hover: 0 6px 28px rgba(27,157,158,0.15);
+  --bg-card:      var(--warm-card);
+  --bg-card-alt:  var(--warm-card-alt);
+  --bg-sidebar:   var(--warm-sidebar);
 }
 
 [data-testid="stAppViewContainer"] {
@@ -464,14 +481,14 @@ h1,h2,h3,h4 {
 .gauge-label { font-size: 0.78rem; fill: var(--text-dim); text-transform: uppercase; letter-spacing: 2px; font-family: 'Quicksand', sans-serif; }
 
 .xp-track { background: rgba(27,157,158,0.1); border-radius: 12px; height: 14px; overflow: hidden; }
-.xp-fill { height: 100%; border-radius: 12px; background: linear-gradient(90deg, var(--blue), var(--blue-light)); transition: width .5s ease; }
+.xp-fill { height: 100%; border-radius: 12px; background: linear-gradient(90deg, var(--gold), var(--orange)); transition: width .5s ease; box-shadow: 0 0 12px var(--gold-glow); }
 
 .level-ring {
-  width: 64px; height: 64px; border-radius: 50%;
-  background: linear-gradient(135deg, var(--blue), var(--blue-deep));
+  width: 72px; height: 72px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--red), var(--orange));
   display: inline-flex; align-items: center; justify-content: center;
-  font-weight: 900; font-size: 1.4rem; color: #fff;
-  box-shadow: 0 3px 14px var(--blue-glow); border: 3px solid var(--blue-light);
+  font-weight: 900; font-size: 1.6rem; color: #fff;
+  box-shadow: 0 4px 18px var(--red-glow); border: 4px solid var(--gold);
   font-family: 'Quicksand', sans-serif;
 }
 
@@ -493,8 +510,10 @@ h1,h2,h3,h4 {
 }
 .stTabs [data-baseweb="tab"]:hover { background: var(--bg-card-alt); color: var(--text); border-color: var(--blue-light); transform: translateY(-1px); }
 .stTabs [aria-selected="true"] {
-  background: linear-gradient(135deg, var(--blue), var(--blue-deep)) !important;
-  color: #fff !important; border-color: var(--blue) !important; box-shadow: 0 3px 16px var(--blue-glow);
+  background: linear-gradient(135deg, var(--red), var(--red-deep)) !important;
+  color: #fff !important; border-color: var(--red) !important;
+  box-shadow: 0 4px 18px var(--red-glow);
+  transform: translateY(-1px);
 }
 .stTabs [data-baseweb="tab-highlight"] { display: none; }
 .stTabs [data-baseweb="tab-content"] { background: transparent; }
@@ -645,36 +664,65 @@ footer:after {
 }
 
 /* ── 手機 RWD ── */
+/* ── 手機 RWD（Duolingo-style 大 tap 區）── */
 @media only screen and (max-width: 768px) {
   .stButton > button {
-    min-height: 52px !important;
-    font-size: 1.05rem !important;
-    padding: 14px 24px !important;
+    min-height: 60px !important;
+    font-size: 1.1rem !important;
+    padding: 16px 24px !important;
+    border-radius: 18px !important;
+    font-weight: 800 !important;
   }
   .stButton > button[kind="primary"] {
-    min-height: 56px !important;
-    padding: 16px 28px !important;
-    font-size: 1.1rem !important;
+    min-height: 64px !important;
+    padding: 18px 28px !important;
+    font-size: 1.2rem !important;
+    box-shadow: 0 6px 0 var(--red-deep) !important;  /* Duolingo 招牌「按下去陷下去」陰影 */
+  }
+  .stButton > button[kind="primary"]:active {
+    transform: translateY(4px);
+    box-shadow: 0 2px 0 var(--red-deep) !important;
   }
   .stNumberInput input, .stTextInput input, .stSelectbox select {
     font-size: 18px !important;
-    min-height: 48px !important;
+    min-height: 52px !important;
+    border-radius: 14px !important;
   }
   .stNumberInput label, .stTextInput label, .stSelectbox label {
     font-size: 16px !important;
+    font-weight: 700 !important;
   }
   .stNumberInput div[data-testid="stNumberInputStepControls"] button {
-    min-width: 40px !important;
-    min-height: 40px !important;
-    font-size: 20px !important;
+    min-width: 44px !important;
+    min-height: 44px !important;
+    font-size: 22px !important;
   }
   .stRadio label {
     font-size: 18px !important;
-    padding: 10px 16px !important;
+    padding: 14px 18px !important;
   }
   [data-testid="stCameraInput"] label {
     font-size: 18px !important;
-    padding: 16px !important;
+    padding: 18px !important;
+  }
+  /* 卡片更圓潤、emoji 更大 */
+  .card { border-radius: 22px !important; padding: 20px !important; }
+  .level-ring { width: 80px !important; height: 80px !important; font-size: 1.8rem !important; }
+  .game-node { width: 64px !important; height: 64px !important; font-size: 1.3rem !important; }
+  .game-node.boss { width: 72px !important; height: 72px !important; font-size: 1.5rem !important; }
+  .game-hearts-bar { font-size: 1.6rem !important; }
+  /* tabs 在手機上要可橫滑 */
+  .stTabs [data-baseweb="tab-list"] {
+    overflow-x: auto !important;
+    flex-wrap: nowrap !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .stTabs [data-baseweb="tab-list"]::-webkit-scrollbar { display: none; }
+  .stTabs [data-baseweb="tab"] {
+    flex-shrink: 0 !important;
+    padding: 14px 22px !important;
+    font-size: 1rem !important;
   }
 }
 </style>
@@ -1050,20 +1098,17 @@ def render_sidebar():
     pct = min((xp - cur_xp) / max(1, next_xp - cur_xp), 1.0)
     streak = st.session_state.streak
 
-    if LOGO_PATH.exists():
-        st.image(str(LOGO_PATH), width=100)
-    else:
-        st.markdown("""
-        <div style="text-align:center; margin-bottom:8px;">
-          <span style="font-size:1.4rem; font-weight:900;
-                       background:linear-gradient(135deg,#1B9D9E,#0E6E6F);
-                       -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-                       font-family:'Noto Sans TC',sans-serif;">
-            SousVille
-          </span>
-        </div>""", unsafe_allow_html=True)
-
-    _show_banner()
+    # 移除左上角 logo，改用更精簡的文字 header（手機友善）
+    st.markdown("""
+    <div style="text-align:center; margin: 4px 0 12px;">
+      <span style="font-size:1.5rem; font-weight:900;
+                   background:linear-gradient(135deg,#E63946,#FF6B35);
+                   -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+                   font-family:'Noto Sans TC',sans-serif;
+                   letter-spacing: 1px;">
+        🔥 舒肥底家
+      </span>
+    </div>""", unsafe_allow_html=True)
 
     if st.session_state.profile_complete:
         mood = get_dolphin_mood()
@@ -2260,32 +2305,52 @@ def render_theme_widget():
         if api_client.refresh_active_theme_into_session():
             data = st.session_state.get("active_theme") or {}
 
-    # 沒 active run
-    if not data.get("run_id") and not data.get("has_active", True):
-        next_theme = data.get("next_theme")
+    # 防禦性邏輯：只看 run_id 來決定渲染哪一條 path
+    # （之前看 has_active 預設 True 會導致 API 失敗時走錯 branch）
+    has_run = bool(data.get("run_id"))
+
+    # ── 沒 active run → 顯示「開始下一期」CTA ──
+    if not has_run:
+        next_theme = data.get("next_theme") or {}
         encouragement = data.get("encouragement", "")
-        if not next_theme:
+
+        # 全部通關 (next_theme is null but server confirmed)
+        if data and "next_theme" in data and next_theme is None:
             st.markdown(f"""
-            <div class="card" style="text-align:center; padding:20px; margin-bottom:14px;">
-              <div style="font-size:1.2rem; margin-bottom:6px;">🏆</div>
-              <div style="color:var(--text-dim);">{encouragement}</div>
+            <div class="card" style="text-align:center; padding:20px; margin-bottom:14px;
+                                     background:linear-gradient(135deg, rgba(255,179,0,0.10), rgba(255,107,53,0.06));">
+              <div style="font-size:2rem; margin-bottom:6px;">🏆</div>
+              <div style="color:var(--text); font-weight:700;">{encouragement or "你已經把所有主題都通關了，太厲害了！"}</div>
             </div>""", unsafe_allow_html=True)
             return
+
+        # 後端 down / 還在 cold start：用 fiber 當 default 介紹（不會卡住 UI）
+        if not next_theme:
+            next_theme = {
+                "icon": "🥦",
+                "title": "膳食纖維週",
+                "description": "連續 5 天蔬菜吃 5 份、全穀根莖 6 份，腸道菌會跟你說謝謝",
+            }
+            encouragement = encouragement or "歡迎挑戰你的第一期主題 🚀"
 
         icon = next_theme.get("icon", "🎯")
         title = next_theme.get("title", "")
         desc = next_theme.get("description", "")
         st.markdown(f"""
-        <div class="card" style="padding:18px; margin-bottom:14px;
-                                 background:linear-gradient(135deg, rgba(27,157,158,0.08), rgba(255,179,0,0.06));">
-          <div style="display:flex; align-items:center; gap:12px; margin-bottom:8px;">
-            <div style="font-size:2.2rem;">{icon}</div>
-            <div>
-              <div style="font-weight:900; font-size:1.1rem; color:var(--text);">下一期主題：{title}</div>
-              <div style="color:var(--text-dim); font-size:.85rem; margin-top:2px;">{desc}</div>
+        <div class="card" style="padding:20px; margin-bottom:14px;
+                                 background:linear-gradient(135deg, rgba(230,57,70,0.08), rgba(255,179,0,0.10));
+                                 border:2px solid var(--gold);">
+          <div style="display:flex; align-items:center; gap:14px; margin-bottom:10px;">
+            <div style="font-size:2.6rem;">{icon}</div>
+            <div style="flex:1;">
+              <div style="font-weight:900; font-size:1.15rem; color:var(--text);">下一期主題：{title}</div>
+              <div style="color:var(--text-dim); font-size:.88rem; margin-top:4px; line-height:1.4;">{desc}</div>
             </div>
           </div>
-          <div style="color:var(--text-dim); font-size:.88rem; margin:8px 0;">{encouragement}</div>
+          <div style="color:var(--text); font-size:.92rem; margin:10px 0; padding:10px;
+                      background:rgba(255,255,255,0.7); border-radius:12px; text-align:center;">
+            {encouragement}
+          </div>
         </div>""", unsafe_allow_html=True)
         if st.button(f"🚀 開始挑戰 {title}", key="start_next_theme",
                      type="primary", use_container_width=True):
@@ -2295,7 +2360,7 @@ def render_theme_widget():
                 st.success("開始囉！第一片徽章在等你 ✨")
                 st.rerun()
             except APIError as exc:
-                st.warning(f"開新主題遇到問題：{exc.detail}")
+                st.warning(f"開新主題遇到問題：{exc.detail}（可以稍後再試）")
         return
 
     # 有 active run
