@@ -1516,7 +1516,11 @@ def page_profile():
             "activity": activity, "goal": goal,
         })
         st.session_state.profile_complete = True
-        st.success("資料已儲存！")
+        st.success("✅ 資料已儲存！系統已幫你算好 BMR / TDEE / 目標卡路里")
+        st.info("💧 提醒：之後可以隨時在「📊 數據」section 更新體重，追蹤趨勢")
+        # onboarding 流程結束後讓主畫面變成 game-first 首頁
+        st.session_state.pop("onboarding_step", None)
+        st.session_state.pop("onboarding_quiz_idx", None)
 
         # 重新拉今日 log，讓 BMR/TDEE/target 由後端計算覆蓋本地估算
         api_client.refresh_today_log_into_session()
@@ -2556,6 +2560,270 @@ def render_badge_wall():
             </div>""", unsafe_allow_html=True)
 
 
+ONBOARDING_QUESTIONS = [
+    {
+        "topic": "🔥 BMR（基礎代謝率）",
+        "question": "BMR 是什麼？",
+        "options": [
+            "你一天總共消耗多少熱量",
+            "你完全休息時，身體運作所需要的最低熱量",
+            "你運動時消耗的熱量",
+            "你吃進去的熱量",
+        ],
+        "answer": 1,
+        "explanation": (
+            "BMR (Basal Metabolic Rate) 是你完全躺著不動時，身體維持心跳、"
+            "呼吸、體溫等基本機能消耗的熱量。通常占一天總消耗的 60-70%。"
+        ),
+    },
+    {
+        "topic": "📏 BMI（身體質量指數）",
+        "question": "BMI 怎麼算？",
+        "options": [
+            "體重(kg) / 身高(m)²",
+            "體重(kg) × 身高(m)",
+            "腰圍 / 臀圍",
+            "體脂肪 / 體重",
+        ],
+        "answer": 0,
+        "explanation": (
+            "BMI = 體重(kg) / 身高(m)² → 例如 60kg / 1.65² ≈ 22。"
+            "正常範圍 18.5-24，但 BMI 不分肌肉脂肪，肌肉量大的人 BMI 可能偏高。"
+        ),
+    },
+    {
+        "topic": "⚡ TDEE（每日總消耗）",
+        "question": "TDEE 跟 BMR 有什麼差別？",
+        "options": [
+            "TDEE 跟 BMR 是一樣的東西",
+            "TDEE = BMR + 你日常活動 / 運動的消耗",
+            "TDEE 只算運動消耗",
+            "TDEE 比 BMR 小",
+        ],
+        "answer": 1,
+        "explanation": (
+            "TDEE = BMR × 活動係數。久坐 1.2 倍、輕度活動 1.375 倍、中度 1.55 倍…等。"
+            "想減重 → 每天攝取 < TDEE 就會有熱量赤字。"
+        ),
+    },
+    {
+        "topic": "📉 熱量赤字",
+        "question": "想要健康減 1 公斤，大約需要累積多少熱量赤字？",
+        "options": [
+            "1000 大卡",
+            "3500 大卡",
+            "7700 大卡",
+            "15000 大卡",
+        ],
+        "answer": 2,
+        "explanation": (
+            "1 公斤脂肪 ≈ 7700 大卡。如果每天少吃 / 多動 500 卡，"
+            "大約 15-16 天可以減 1 公斤（不要太快，肌肉會掉太多）。"
+        ),
+    },
+]
+
+
+# ═══════════════════════════════════════════════════════════
+#  Onboarding 流程（新使用者引導）
+# ═══════════════════════════════════════════════════════════
+
+def page_onboarding():
+    """新使用者引導：Welcome → BMR/TDEE Quiz 教學 → Summary → Profile。
+
+    流程：
+    - step="welcome" → 介紹卡 + 兩個選項（先學 / 直接填）
+    - step="quiz"    → 4 題教學 quiz（純學習，不影響 game state）
+    - step="summary" → 知識小總結卡
+    - step="profile" → 走到 page_profile（既有的設定頁）
+
+    profile 完成（profile_complete=True）後 main() 會跳過這整個流程。
+    """
+    step = st.session_state.get("onboarding_step", "welcome")
+
+    if step == "welcome":
+        _render_onboarding_welcome()
+    elif step == "quiz":
+        _render_onboarding_quiz()
+    elif step == "summary":
+        _render_onboarding_summary()
+    elif step == "profile":
+        _render_onboarding_profile()
+    else:
+        # 未知狀態 → 回 welcome
+        st.session_state.onboarding_step = "welcome"
+        st.rerun()
+
+
+def _render_onboarding_welcome():
+    """Step 1: 歡迎卡 + 兩個選項。"""
+    st.markdown("""
+    <div class="card" style="text-align:center; padding:36px 22px; margin: 18px 0;
+                             background: linear-gradient(135deg, rgba(255,179,0,0.14), rgba(255,138,101,0.10));
+                             border: 2px solid var(--gold);">
+      <div style="font-size:3.6rem; margin-bottom:8px;">🎉</div>
+      <h2 style="margin:8px 0 14px;">歡迎來到舒肥底家！</h2>
+      <p style="color:var(--text); font-size:1rem; margin: 12px 0; line-height:1.6;">
+        在開始填資料前，先花 <strong style="color:var(--red-deep);">5 分鐘</strong>
+        學什麼是 <strong style="color:var(--red-deep);">BMR / BMI / TDEE</strong>？
+      </p>
+      <p style="color:var(--text-dim); font-size:.9rem; line-height:1.6;">
+        知道這些之後，你會更清楚為什麼系統需要你的身高體重，<br>
+        而且還能拿到第一批 XP！🏆
+      </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("▶️ 先學 5 分鐘（推薦）",
+                     type="primary", use_container_width=True,
+                     key="onboarding_start_learn"):
+            st.session_state.onboarding_step = "quiz"
+            st.session_state.onboarding_quiz_idx = 0
+            # 清掉每題的暫存（避免從上次卡關狀態繼續）
+            for i in range(len(ONBOARDING_QUESTIONS)):
+                st.session_state.pop(f"ob_q{i}_answered", None)
+                st.session_state.pop(f"ob_q{i}_selected", None)
+            st.rerun()
+    with c2:
+        if st.button("⏭️ 直接填資料",
+                     use_container_width=True,
+                     key="onboarding_skip_to_profile"):
+            st.session_state.onboarding_step = "profile"
+            st.rerun()
+
+
+def _render_onboarding_quiz():
+    """Step 2: 跑 4 題教學 quiz。"""
+    idx = int(st.session_state.get("onboarding_quiz_idx", 0))
+    total = len(ONBOARDING_QUESTIONS)
+
+    if idx >= total:
+        st.session_state.onboarding_step = "summary"
+        st.rerun()
+        return
+
+    q = ONBOARDING_QUESTIONS[idx]
+    pct = idx / total * 100
+
+    # 進度條
+    st.markdown(f"""
+    <div style="margin-bottom:14px;">
+      <div style="display:flex; justify-content:space-between;
+                  font-size:.85rem; color:var(--text-dim); margin-bottom:4px;">
+        <span>{q['topic']}</span>
+        <span>第 {idx+1} / {total} 題</span>
+      </div>
+      <div class="status-xp-track">
+        <div class="status-xp-fill" style="width:{pct:.0f}%"></div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div class="quiz-card" style="padding:24px 28px; margin-bottom:14px;">
+      <h3 style="font-size:1.1rem; margin:0;">{q['question']}</h3>
+    </div>
+    """, unsafe_allow_html=True)
+
+    answered = st.session_state.get(f"ob_q{idx}_answered", False)
+
+    if not answered:
+        choice = st.radio(
+            "選擇答案",
+            range(len(q["options"])),
+            format_func=lambda i: q["options"][i],
+            key=f"ob_q{idx}_radio",
+            label_visibility="collapsed",
+        )
+        if st.button("確認答案", type="primary", use_container_width=True,
+                     key=f"ob_q{idx}_confirm"):
+            st.session_state[f"ob_q{idx}_answered"] = True
+            st.session_state[f"ob_q{idx}_selected"] = int(choice)
+            st.rerun()
+    else:
+        selected = int(st.session_state.get(f"ob_q{idx}_selected", -1))
+        correct = (selected == q["answer"])
+        if correct:
+            st.success("✅ 答對了！")
+        else:
+            st.info(f"💡 正確答案：**{q['options'][q['answer']]}**")
+        st.markdown(f"""
+        <div style="background:rgba(255,179,0,0.12);
+                    border-left: 4px solid var(--gold);
+                    padding: 14px 18px; border-radius: 12px; margin: 12px 0;
+                    font-size:.95rem; line-height: 1.6;">
+          📖 {q['explanation']}
+        </div>
+        """, unsafe_allow_html=True)
+
+        next_label = "看總結 →" if idx >= total - 1 else "下一題 →"
+        if st.button(next_label, type="primary", use_container_width=True,
+                     key=f"ob_q{idx}_next"):
+            st.session_state.onboarding_quiz_idx = idx + 1
+            st.rerun()
+
+
+def _render_onboarding_summary():
+    """Step 3: 知識總結卡 + 進入 profile 按鈕。"""
+    st.markdown("""
+    <div class="card" style="text-align:center; padding:32px 22px; margin: 18px 0;
+                             background: linear-gradient(135deg, rgba(67,160,71,0.10), rgba(255,179,0,0.16));
+                             border: 2px solid var(--success);">
+      <div style="font-size:3.6rem;">🎓✨</div>
+      <h2 style="margin:8px 0 18px;">太棒了，你學到了：</h2>
+      <ul style="text-align:left; max-width:380px; margin: 0 auto 18px;
+                 font-size:1rem; line-height:2.2; color: var(--text); padding-left: 4px;">
+        <li>🔥 <strong>BMR</strong> — 你身體基本運作的熱量</li>
+        <li>📏 <strong>BMI</strong> — 身材標準化指標</li>
+        <li>⚡ <strong>TDEE</strong> — 一天總消耗 = BMR × 活動量</li>
+        <li>📉 <strong>熱量赤字</strong> — 7700 卡 ≈ 1 kg 體重</li>
+      </ul>
+      <p style="color:var(--text-dim); margin-top: 14px; font-size:.92rem; line-height:1.6;">
+        現在系統會用你的資料幫你算出個人化目標！<br>
+        BMR / TDEE / 目標卡路里全自動算給你 🎯
+      </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("📝 開始填資料", type="primary", use_container_width=True,
+                 key="onboarding_to_profile"):
+        st.session_state.onboarding_step = "profile"
+        st.rerun()
+
+
+def _render_onboarding_profile():
+    """Step 4: 包裝 page_profile，加上 onboarding header + 體重提醒小卡。"""
+    st.markdown("""
+    <div style="text-align:center; padding: 14px 0 8px;">
+      <div style="display:inline-block; background: linear-gradient(135deg, var(--gold), var(--orange));
+                  color: #fff; padding: 6px 18px; border-radius: 20px;
+                  font-weight: 800; font-size: .88rem; letter-spacing: 1px;">
+        最後一步 — 填基本資料
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 體重隨時可改的提醒小卡（放在 profile 表單上方）
+    st.markdown("""
+    <div class="card" style="padding:14px 18px; margin: 12px 0 18px;
+                             background: rgba(255,179,0,0.10);
+                             border: 1px solid rgba(255,179,0,0.3);">
+      <div style="display:flex; align-items:center; gap:12px;">
+        <div style="font-size:1.6rem;">💧</div>
+        <div style="font-size:.9rem; color:var(--text); line-height:1.5;">
+          <strong>體重會變動，沒關係！</strong>
+          填好之後還能<strong style="color:var(--red-deep);">隨時在「📊 數據」頁更新</strong>，
+          系統會幫你追蹤體重曲線、看趨勢。
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    page_profile()
+
+
 def render_top_status_bar():
     """頂部精簡狀態條：Lv pill + 名字 + XP bar + Hearts。
 
@@ -2710,10 +2978,9 @@ def main():
         page_exercise_manager()
         return
 
-    # Profile 沒填完 → 強制先導去個人設定頁
+    # Profile 沒填完 → 走 onboarding 流程（welcome → quiz → summary → profile）
     if not st.session_state.profile_complete:
-        st.warning("第一次登入，請先完成「個人設定」（身高 / 體重 / 目標）。")
-        page_profile()
+        page_onboarding()
         return
 
     # ── Game-first 首頁 ──
@@ -2728,6 +2995,46 @@ def main():
     elif section == "exercise":
         tab_exercise_record()
     elif section == "stats":
+        # 快速更新體重 widget（折疊起來，要用才展開，不擋主畫面）
+        with st.expander("📏 更新今日體重", expanded=False):
+            cur_weight = float(
+                st.session_state.user_data.get("weight") or 70
+            )
+            wc1, wc2 = st.columns([2, 1])
+            with wc1:
+                new_weight = st.number_input(
+                    "今日體重 (kg)",
+                    min_value=30.0, max_value=300.0,
+                    value=cur_weight,
+                    step=0.1, format="%.1f",
+                    key="quick_weight_input",
+                )
+            with wc2:
+                st.markdown("<div style='height:28px;'></div>",
+                            unsafe_allow_html=True)
+                if st.button("💾 紀錄", type="primary",
+                             use_container_width=True,
+                             key="quick_weight_save"):
+                    if abs(new_weight - cur_weight) < 0.01:
+                        st.info("體重沒變動，不用紀錄 😊")
+                    else:
+                        try:
+                            api_client.update_profile({"weight_kg": float(new_weight)})
+                            try:
+                                api_client.record_weight(float(new_weight))
+                            except APIError:
+                                pass
+                            st.session_state.user_data["weight"] = float(new_weight)
+                            api_client.refresh_today_log_into_session()
+                            delta = new_weight - cur_weight
+                            sign = "+" if delta > 0 else ""
+                            st.success(
+                                f"✅ 已更新體重 {new_weight:.1f} kg "
+                                f"（{sign}{delta:.1f} kg）"
+                            )
+                        except APIError as exc:
+                            st.error(f"更新失敗：{exc.detail}")
+
         render_top_dashboard()      # 儀表板（gauges + dolphin advisor）
         st.markdown("---")
         tab_calorie_deficit()       # 熱量赤字總覽
