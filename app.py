@@ -1,5 +1,5 @@
 """
-舒肥底家 SousVille — 遊戲化健康管理系統
+NutriGo NutriGo — 遊戲化健康管理系統
 ========================================
 Streamlit 前端  |  BMI · TDEE · 熱量赤字 · 每日問答 · 運動紀錄 · XP 商城
 
@@ -145,7 +145,7 @@ PORTION_CAL = {
     "奶類":     60,
 }
 
-AI_SYSTEM_PROMPT = """你是「舒肥底家 SousVille」的營養助手。你的唯一職責是辨識食物照片並回傳營養數據。
+AI_SYSTEM_PROMPT = """你是「NutriGo NutriGo」的營養助手。你的唯一職責是辨識食物照片並回傳營養數據。
 
 嚴格規則：
 1. 只處理「餐盒中的食物」或「包裝上的營養標示表格」兩類圖片。
@@ -160,7 +160,7 @@ AI_SYSTEM_PROMPT = """你是「舒肥底家 SousVille」的營養助手。你的
 輸出格式（營養標示）：
 精確提取標示上的數值，格式同上。單位皆為公克(g)。
 
-舒肥底家份量參考（估算餐盒時使用）：
+NutriGo份量參考（估算餐盒時使用）：
 - 小鳥胃份量：約 400-540 kcal
 - 輕盈份量：約 460-600 kcal
 - 勻稱份量：約 480-760 kcal
@@ -377,7 +377,7 @@ def get_weight_trend_message(mood, delta):
 # ═══════════════════════════════════════════════════════════
 
 st.set_page_config(
-    page_title="舒肥底家 | SousVille",
+    page_title="NutriGo | NutriGo",
     page_icon="🏠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -653,7 +653,7 @@ h1,h2,h3,h4 {
 #MainMenu {visibility: hidden;}
 footer {visibility: hidden;}
 footer:after {
-  content: '© 2026 舒肥底家 SousVille';
+  content: '© 2026 NutriGo NutriGo';
   visibility: visible;
   display: block;
   text-align: center;
@@ -774,9 +774,19 @@ div[data-testid="stHorizontalBlock"] .stButton button.section-nav-btn-active {
   }
   /* 卡片更圓潤、emoji 更大 */
   .card { border-radius: 22px !important; padding: 20px !important; }
-  .level-ring { width: 80px !important; height: 80px !important; font-size: 1.8rem !important; }
-  .game-node { width: 64px !important; height: 64px !important; font-size: 1.3rem !important; }
-  .game-node.boss { width: 72px !important; height: 72px !important; font-size: 1.5rem !important; }
+  .level-ring { width: 72px !important; height: 72px !important; font-size: 1.6rem !important; }
+  /* 關卡 5 圈 + 4 條連線必須塞進 360px iPhone */
+  .game-node {
+    width: 44px !important; height: 44px !important;
+    font-size: 1rem !important; border-width: 2px !important;
+  }
+  .game-node.boss {
+    width: 50px !important; height: 50px !important;
+    font-size: 1.15rem !important;
+  }
+  .game-connector { width: 14px !important; height: 3px !important; }
+  .game-row { gap: 0 !important; flex-wrap: nowrap !important;
+              justify-content: center !important; }
   .game-hearts-bar { font-size: 1.6rem !important; }
   /* tabs 在手機上要可橫滑 */
   .stTabs [data-baseweb="tab-list"] {
@@ -791,6 +801,19 @@ div[data-testid="stHorizontalBlock"] .stButton button.section-nav-btn-active {
     padding: 14px 22px !important;
     font-size: 1rem !important;
   }
+}
+
+/* ── 超窄螢幕（小手機 ≤ 380px）關卡圈再縮小一點 ── */
+@media only screen and (max-width: 380px) {
+  .game-node {
+    width: 38px !important; height: 38px !important;
+    font-size: 0.9rem !important;
+  }
+  .game-node.boss {
+    width: 44px !important; height: 44px !important;
+    font-size: 1rem !important;
+  }
+  .game-connector { width: 10px !important; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -1198,7 +1221,7 @@ def render_sidebar():
                    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
                    font-family:'Noto Sans TC',sans-serif;
                    letter-spacing: 1px;">
-        🔥 舒肥底家
+        🔥 NutriGo
       </span>
     </div>""", unsafe_allow_html=True)
 
@@ -1285,7 +1308,7 @@ def render_coupon_popup():
       </p>
     </div>""", unsafe_allow_html=True)
     st.markdown(
-        "[🛒 前往舒肥底家商城](https://sousville.com)  "
+        "[🛒 前往NutriGo商城](https://sousville.com)  "
         "使用優惠碼 **SOUSVILLE85** 享 85 折優惠！"
     )
 
@@ -1299,7 +1322,7 @@ def page_auth():
     _show_logo(center=True, height=140)
     st.markdown("""
     <div style="text-align:center; padding:0 0 28px;">
-      <p style="color:var(--text-dim); font-size:1.05rem;">SousVille — 你的遊戲化健康管理夥伴</p>
+      <p style="color:var(--text-dim); font-size:1.05rem;">NutriGo — 你的遊戲化健康管理夥伴</p>
     </div>""", unsafe_allow_html=True)
 
     # ── 1. 處理 LINE 跳回的 callback (?code=...&state=...) ──
@@ -2720,7 +2743,7 @@ def _render_onboarding_welcome():
                              background: linear-gradient(135deg, rgba(255,179,0,0.14), rgba(255,138,101,0.10));
                              border: 2px solid var(--gold);">
       <div style="font-size:3.6rem; margin-bottom:8px;">🎉</div>
-      <h2 style="margin:8px 0 14px;">歡迎來到舒肥底家！</h2>
+      <h2 style="margin:8px 0 14px;">歡迎來到NutriGo！</h2>
       <p style="color:var(--text); font-size:1rem; margin: 12px 0; line-height:1.6;">
         在開始填資料前，先花 <strong style="color:var(--red-deep);">5 分鐘</strong>
         學什麼是 <strong style="color:var(--red-deep);">BMR / BMI / TDEE</strong>？
@@ -2953,16 +2976,22 @@ def render_challenge_section():
 
 def render_sidebar_slim():
     """簡化版 sidebar — 主要狀態移到 top status bar，這裡只放設定 / 登出。"""
-    st.markdown("""
-    <div style="text-align:center; margin: 4px 0 12px;">
-      <span style="font-size:1.5rem; font-weight:900;
-                   background:linear-gradient(135deg,#FF8A65,#FFB300);
-                   -webkit-background-clip:text; -webkit-text-fill-color:transparent;
-                   font-family:'Noto Sans TC',sans-serif;
-                   letter-spacing: 1px;">
-        🔥 舒肥底家
-      </span>
-    </div>""", unsafe_allow_html=True)
+    # 優先顯示 logo 圖片（assets/logo.png）；沒有的話 fallback 到漸層文字
+    if LOGO_PATH.exists():
+        cols = st.columns([1, 4, 1])
+        with cols[1]:
+            st.image(str(LOGO_PATH), use_container_width=True)
+    else:
+        st.markdown("""
+        <div style="text-align:center; margin: 4px 0 12px;">
+          <span style="font-size:1.5rem; font-weight:900;
+                       background:linear-gradient(135deg,#FF8A65,#FFB300);
+                       -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+                       font-family:'Noto Sans TC',sans-serif;
+                       letter-spacing: 1px;">
+            🔥 NutriGo
+          </span>
+        </div>""", unsafe_allow_html=True)
 
     if st.session_state.profile_complete:
         mood = get_dolphin_mood()
