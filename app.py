@@ -800,6 +800,31 @@ div[data-testid="stHorizontalBlock"] .stButton button.section-nav-btn-active {
 #  Session State
 # ═══════════════════════════════════════════════════════════
 
+import time as _time_for_cache
+
+
+def _maybe_refresh(key: str, refresh_fn, ttl_secs: float = 60) -> None:
+    """避免 Streamlit 每次 rerun 都打 API（觸發點只要按按鈕、輸入文字就 rerun）。
+
+    same 個 ``key`` 在 ``ttl_secs`` 秒內最多只實際執行 ``refresh_fn`` 一次；
+    其餘 rerun 直接跳過讓 session_state 裡的舊資料繼續用。
+
+    使用者按下「開始挑戰」「補血」等動作後，動作端會直接呼叫 refresh_*
+    helper（不走這個 wrapper），所以那條路徑不受 TTL 限制，能立刻看到變化。
+    """
+    last_key = f"_last_refresh_{key}"
+    now = _time_for_cache.time()
+    last = float(st.session_state.get(last_key, 0) or 0)
+    if now - last < ttl_secs:
+        return
+    try:
+        refresh_fn()
+    except Exception:
+        pass
+    # 即使 API 失敗也記時間戳，避免短時間內反覆撞 cold start API
+    st.session_state[last_key] = now
+
+
 def init_session_state():
     defaults = {
         "authenticated": False,
@@ -1704,11 +1729,13 @@ def _render_level_stats(chapters_data):
 def tab_daily_challenge():
     st.markdown("### 🎯 關卡挑戰", unsafe_allow_html=True)
 
-    # 跟後端拉最新 game state（hearts / xp / completed_levels / regen 倒數）
-    api_client.refresh_game_state_into_session()
+    # 跟後端拉最新 game state — TTL 保護避免重複拉
+    _maybe_refresh("game_state",
+                   api_client.refresh_game_state_into_session, ttl_secs=30)
 
     try:
-        chapters_resp = api_client.get_chapters()
+        # 章節結構幾乎不變，用 cache 版（5 分鐘 TTL）
+        chapters_resp = api_client.get_chapters_cached()
     except APIError as exc:
         st.error(f"無法載入關卡：{exc.detail}")
         return
@@ -2986,17 +3013,15 @@ def main():
     check_ip_change()
     check_daily_reset()
 
-    # 每次 rerun 都把今日 log + 遊戲狀態 + 主題同步進 session_state
+    # 同步狀態：用 TTL 保護避免每個 button click 都打 4 個 API
+    # 60 秒內最多只跑一次；按鈕動作完後該動作端會自己 explicit refresh
     if not st.session_state.get("today_log_id"):
-        api_client.refresh_today_log_into_session()
-    try:
-        api_client.refresh_active_theme_into_session()
-    except Exception:
-        pass
-    try:
-        api_client.refresh_game_state_into_session()
-    except Exception:
-        pass
+        _maybe_refresh("today_log",
+                       api_client.refresh_today_log_into_session, ttl_secs=60)
+    _maybe_refresh("active_theme",
+                   api_client.refresh_active_theme_into_session, ttl_secs=60)
+    _maybe_refresh("game_state",
+                   api_client.refresh_game_state_into_session, ttl_secs=60)
 
     # 簡化 sidebar — 主要狀態移到 top bar
     with st.sidebar:
