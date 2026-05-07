@@ -2628,16 +2628,20 @@ ONBOARDING_QUESTIONS = [
 #  Onboarding 流程（新使用者引導）
 # ═══════════════════════════════════════════════════════════
 
-def page_onboarding():
+def _clear_onboarding_state():
+    """清掉 onboarding 全部 session_state（退出預覽 / 完成時用）。"""
+    for k in ("show_onboarding", "onboarding_step", "onboarding_quiz_idx"):
+        st.session_state.pop(k, None)
+    for i in range(len(ONBOARDING_QUESTIONS)):
+        st.session_state.pop(f"ob_q{i}_answered", None)
+        st.session_state.pop(f"ob_q{i}_selected", None)
+
+
+def page_onboarding(is_preview: bool = False):
     """新使用者引導：Welcome → BMR/TDEE Quiz 教學 → Summary → Profile。
 
-    流程：
-    - step="welcome" → 介紹卡 + 兩個選項（先學 / 直接填）
-    - step="quiz"    → 4 題教學 quiz（純學習，不影響 game state）
-    - step="summary" → 知識小總結卡
-    - step="profile" → 走到 page_profile（既有的設定頁）
-
-    profile 完成（profile_complete=True）後 main() 會跳過這整個流程。
+    is_preview=True 表示老使用者按「🎓 重看引導教學」進來預覽，最後一步不會
+    跳到真的 profile 表單（避免改到既有資料），改顯示「預覽結束」卡片。
     """
     step = st.session_state.get("onboarding_step", "welcome")
 
@@ -2648,10 +2652,37 @@ def page_onboarding():
     elif step == "summary":
         _render_onboarding_summary()
     elif step == "profile":
-        _render_onboarding_profile()
+        if is_preview:
+            _render_onboarding_preview_end()
+        else:
+            _render_onboarding_profile()
     else:
         # 未知狀態 → 回 welcome
         st.session_state.onboarding_step = "welcome"
+        st.rerun()
+
+
+def _render_onboarding_preview_end():
+    """預覽模式結束卡（避免老使用者被導去 profile 頁）。"""
+    st.markdown("""
+    <div class="card" style="text-align:center; padding:32px 22px; margin:18px 0;
+                             background: linear-gradient(135deg, rgba(67,160,71,0.10), rgba(255,179,0,0.16));
+                             border: 2px solid var(--success);">
+      <div style="font-size:3.6rem;">🎬✨</div>
+      <h2 style="margin:8px 0 14px;">預覽結束！</h2>
+      <p style="color:var(--text); font-size:1rem; line-height:1.6;">
+        新使用者走到這一步會進到 <strong>📝 填資料</strong> 頁面，<br>
+        系統會幫他用身高體重算出 BMR / TDEE / 目標卡路里。
+      </p>
+      <p style="color:var(--text-dim); font-size:.9rem; margin-top:16px; line-height:1.6;">
+        因為你已經是老使用者，按下「返回主畫面」回到遊戲首頁就好 🎮
+      </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button("← 返回主畫面", type="primary", use_container_width=True,
+                 key="onboarding_preview_done"):
+        _clear_onboarding_state()
         st.rerun()
 
 
@@ -2924,6 +2955,14 @@ def render_sidebar_slim():
                  key="sidebar_exmgr"):
         st.session_state["show_exercise_mgr"] = True
         st.rerun()
+    if st.button("🎓 重看引導教學", use_container_width=True, type="secondary",
+                 key="sidebar_replay_onboarding",
+                 help="重新看一次 BMR / TDEE 教學（不會改你的資料）"):
+        _clear_onboarding_state()
+        st.session_state["show_onboarding"] = True
+        st.session_state["onboarding_step"] = "welcome"
+        st.session_state["onboarding_quiz_idx"] = 0
+        st.rerun()
 
     st.markdown("---")
     if st.button("登出", use_container_width=True, type="secondary",
@@ -2976,6 +3015,16 @@ def main():
             st.session_state.pop("show_exercise_mgr", None)
             st.rerun()
         page_exercise_manager()
+        return
+
+    # 🎓 重看引導教學（preview 模式 — 老使用者也能體驗）
+    if st.session_state.get("show_onboarding"):
+        if st.button("← 退出預覽", key="onboarding_back_top",
+                     type="secondary"):
+            _clear_onboarding_state()
+            st.rerun()
+        st.caption("🎓 預覽模式 — 你已是老使用者，這只是讓你看流程，不會改到資料")
+        page_onboarding(is_preview=True)
         return
 
     # Profile 沒填完 → 走 onboarding 流程（welcome → quiz → summary → profile）
