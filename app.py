@@ -2037,7 +2037,12 @@ def tab_diet_record():
                         return
                     st.session_state.pop("ai_result", None)
                     api_client.refresh_today_log_into_session()
-                    st.success(f"已紀錄：{food_name} ({cal_int} kcal) ✅")
+                    new_total = int(st.session_state.get("today_cal_in", 0) or 0)
+                    target_kcal = int(st.session_state.user_data.get("target") or 2000)
+                    st.success(
+                        f"✅ AI 辨識已紀錄：**{food_name} {cal_int} kcal**\n\n"
+                        f"📊 今日累計攝取：**{new_total} / {target_kcal} kcal**"
+                    )
                     st.rerun()
         else:
             st.session_state.pop("ai_result", None)
@@ -2075,7 +2080,12 @@ def tab_diet_record():
                 st.error(f"紀錄失敗：{exc.detail}")
                 return
             api_client.refresh_today_log_into_session()
-            st.success(f"已紀錄：{bento_name} ({bento_cal} kcal) ✅")
+            new_total = int(st.session_state.get("today_cal_in", 0) or 0)
+            target_kcal = int(st.session_state.user_data.get("target") or 2000)
+            st.success(
+                f"✅ 已紀錄：**{bento_name} {bento_cal} kcal**\n\n"
+                f"📊 今日累計攝取：**{new_total} / {target_kcal} kcal**"
+            )
             st.rerun()
 
     # ── 模式三：手動份量 ──
@@ -2124,7 +2134,12 @@ def tab_diet_record():
                 st.error(f"紀錄失敗：{exc.detail}")
                 return
             api_client.refresh_today_log_into_session()
-            st.success(f"已紀錄：手動份量 ({manual_cal} kcal) ✅")
+            new_total = int(st.session_state.get("today_cal_in", 0) or 0)
+            target_kcal = int(st.session_state.user_data.get("target") or 2000)
+            st.success(
+                f"✅ 已紀錄：**手動份量 {manual_cal} kcal**\n\n"
+                f"📊 今日累計攝取：**{new_total} / {target_kcal} kcal**"
+            )
             st.rerun()
 
     # ── 份量達成進度 ──
@@ -2212,8 +2227,12 @@ def tab_exercise_record():
             st.error(f"紀錄失敗：{exc.detail}")
             return
         api_client.refresh_today_log_into_session()
+        new_burned = int(st.session_state.get("today_cal_out", 0) or 0)
         log_text = f"{ex_name} MET {met} {duration}分 ({est_cal} kcal)"
-        st.success(f"已紀錄：{log_text} ✅")
+        st.success(
+            f"✅ 已紀錄：**{log_text}**\n\n"
+            f"🔥 今日累計消耗：**{new_burned} kcal**"
+        )
         st.rerun()
 
     st.markdown("---")
@@ -2960,7 +2979,12 @@ def render_section_nav() -> str:
             )
             if btn and not is_active:
                 st.session_state.home_section = key
-                st.rerun()
+                # scope="fragment" 讓 fragment 重跑就好（不重跑整個 main）
+                try:
+                    st.rerun(scope="fragment")
+                except TypeError:
+                    # 老版 Streamlit 沒 scope 參數 — fallback 全頁 rerun
+                    st.rerun()
     return section
 
 
@@ -3089,7 +3113,17 @@ def main():
     # ── Game-first 首頁 ──
     render_top_status_bar()         # 頂部 Lv/XP/Hearts 條
     render_theme_widget()           # 5 天主題 widget（修：之前根本沒被 call）
-    section = render_section_nav()  # 4 顆 section button
+
+    # 把 section nav + content 包進 fragment，section 切換不會重跑整個
+    # main()。Streamlit 1.37+ 的 @st.fragment 讓這個 function 內的互動只
+    # 觸發 fragment 重跑（不影響 top status bar / theme widget）。
+    _render_home_sections()
+
+
+@st.fragment
+def _render_home_sections():
+    """Section nav + 對應 section 內容（fragment 加速切換）。"""
+    section = render_section_nav()
 
     if section == "challenge":
         render_challenge_section()
