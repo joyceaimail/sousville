@@ -1,0 +1,41 @@
+name: Keep Render services warm
+
+# 每 5 分鐘 ping NutriGo 前端 + 後端，避免 Render 免費方案閒置睡眠。
+# 跟 UptimeRobot 5 分鐘的循環錯開 2 分鐘 → 等效 ping 間隔降到 ~2.5 分鐘。
+
+on:
+  schedule:
+    # GitHub Actions cron 用 UTC；錯開 UptimeRobot（通常從 *:00 開始）
+    - cron: '2-59/5 * * * *'  # min 2, 7, 12, 17, 22, 27, 32, 37, 42, 47, 52, 57
+  workflow_dispatch:  # 也允許手動觸發
+
+# 不需要任何權限
+permissions: {}
+
+# 同時只跑一個（避免 schedule 重疊）
+concurrency:
+  group: keep-alive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Ping frontend (app.joyceaimail.org)
+        run: |
+          echo "→ Frontend"
+          curl -sS -o /dev/null \
+            -w "  HTTP %{http_code}  time=%{time_total}s\n" \
+            --max-time 60 \
+            https://app.joyceaimail.org/ \
+            || echo "  (ping failed — service might be cold-starting; will retry next cycle)"
+
+      - name: Ping backend (api.joyceaimail.org)
+        run: |
+          echo "→ Backend"
+          curl -sS -o /dev/null \
+            -w "  HTTP %{http_code}  time=%{time_total}s\n" \
+            --max-time 60 \
+            https://api.joyceaimail.org/api/v1/constants/all \
+            || echo "  (ping failed — service might be cold-starting; will retry next cycle)"
