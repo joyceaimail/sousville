@@ -1317,8 +1317,84 @@ def render_coupon_popup():
 #  頁面：身份驗證
 # ═══════════════════════════════════════════════════════════
 
+def _prewarm_backend_async():
+    """背景 thread ping 後端，喚醒它而不卡 UI。
+
+    Streamlit free tier 經常因為 cold start 第一次 API 呼叫會 502。
+    這個 helper 在使用者打開 app 那一刻就背景 ping，讓使用者真的點
+    「LINE 登入」/「寄送驗證碼」時後端已經醒了或正在醒。
+
+    用 ``_backend_prewarmed_at`` session_state 旗標避免每次 rerun 都開新 thread；
+    5 分鐘內最多 ping 一次。
+    """
+    import threading
+    import time as _t
+    last = float(st.session_state.get("_backend_prewarmed_at") or 0)
+    if _t.time() - last < 300:  # 5 分鐘
+        return
+    st.session_state["_backend_prewarmed_at"] = _t.time()
+
+    def _ping():
+        try:
+            import requests
+            requests.get(
+                f"{api_client.API_BASE_URL}/api/v1/constants/all",
+                timeout=60,
+            )
+        except Exception:
+            pass  # 失敗也 OK，使用者按 login 時再走正常路徑
+
+    threading.Thread(target=_ping, daemon=True).start()
+
+
+def _is_cold_start_error(exc) -> bool:
+    """偵測 502 / 503 / 504 / 「Application Loading」HTML 等 cold start 訊號。"""
+    if isinstance(exc, APIError):
+        if 500 <= int(exc.status_code or 0) < 600:
+            return True
+    s = str(getattr(exc, "detail", None) or exc).lower()
+    return any(marker in s for marker in (
+        "502", "503", "504",
+        "bad gateway", "service unavailable",
+        "<title>502", "<title>503", "<title>504",
+        "<!doctype html",
+    ))
+
+
+def _render_cold_start_waking_card(action_label: str = "🔄 重新嘗試"):
+    """取代紅色 502 error — 友善「服務喚醒中」卡，自帶重試按鈕。"""
+    st.markdown("""
+    <div class="card" style="text-align:center; padding:36px 22px; margin: 20px auto;
+                             max-width: 480px;
+                             background: linear-gradient(135deg, rgba(255,179,0,0.10), rgba(255,138,101,0.08));
+                             border: 2px solid var(--gold);">
+      <div style="font-size: 3.4rem; margin-bottom: 10px;">☕</div>
+      <h3 style="margin: 8px 0 14px; color: var(--text);">服務正在喚醒中…</h3>
+      <p style="color:var(--text-dim); font-size:0.95rem; line-height:1.7;">
+        免費方案的服務閒置太久會自動進入睡眠 💤<br>
+        第一次打開要等它伸個懶腰（約 <strong>30-60 秒</strong>）<br>
+        ☘️ 之後就會很快了
+      </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    if st.button(action_label,
+                 type="primary",
+                 use_container_width=True,
+                 key=f"cold_start_retry_{action_label}"):
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+        st.rerun()
+
+
 def page_auth():
     """LINE Login OAuth 流程 — 已從舊版 email/Notion 切換到新後端 API。"""
+    # 一進來就在背景戳醒後端（不卡 UI）— 等使用者看完文案 + 點 login 時
+    # 後端已經在醒了
+    _prewarm_backend_async()
+
     _show_logo(center=True, height=140)
     st.markdown("""
     <div style="text-align:center; padding:0 0 28px;">
@@ -1331,6 +1407,9 @@ def page_auth():
         try:
             api_client.handle_oauth_callback(qp)
         except APIError as exc:
+            if _is_cold_start_error(exc):
+                _render_cold_start_waking_card("🔄 等 30 秒後重新登入")
+                return
             st.error(f"登入失敗：{exc.detail}")
             try:
                 st.query_params.clear()
@@ -1429,8 +1508,11 @@ def _render_email_login_flow():
                 api_client.request_email_code(target_email)
                 st.success("✅ 已重新寄出，請查看 Gmail（或垃圾信匣）")
             except APIError as exc:
-                # 60 秒內重複申請會被 rate limit 擋下；訊息直接給使用者看
-                st.warning(f"重寄太頻繁：{exc.detail}")
+                if _is_cold_start_error(exc):
+                    st.warning("☕ 後端正在喚醒，等 30 秒再按一次重寄")
+                else:
+                    # 60 秒內重複申請會被 rate limit 擋下；訊息直接給使用者看
+                    st.warning(f"重寄太頻繁：{exc.detail}")
 
         if verify_clicked:
             if not code or not code.strip():
@@ -1439,6 +1521,9 @@ def _render_email_login_flow():
             try:
                 api_client.verify_email_code(target_email, code.strip())
             except APIError as exc:
+                if _is_cold_start_error(exc):
+                    _render_cold_start_waking_card("🔄 重新驗證")
+                    return
                 st.error(f"驗證失敗：{exc.detail}")
                 return
 
@@ -1485,6 +1570,9 @@ def _render_email_login_flow():
         try:
             api_client.request_email_code(email.strip())
         except APIError as exc:
+            if _is_cold_start_error(exc):
+                _render_cold_start_waking_card("🔄 重新寄送驗證碼")
+                return
             st.error(f"寄送失敗：{exc.detail}")
             return
         st.session_state.email_login_step = "verify"
